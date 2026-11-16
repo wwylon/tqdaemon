@@ -89,7 +89,7 @@ def _try_http_overlay(home: Path, project: str, task_id: str) -> dict[str, Any] 
         req = urllib.request.Request(url)
         if token:
             req.add_header("Authorization", f"Bearer {token}")
-        with urllib.request.urlopen(req, timeout=1.5) as resp:
+        with urllib.request.urlopen(req, timeout=1.5) as resp:  # noqa: S310
             data = json.loads(resp.read().decode("utf-8"))
         for t in data.get("running") or []:
             if t.get("project") == project and t.get("task_id") == task_id:

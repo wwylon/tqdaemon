@@ -206,9 +206,9 @@ r.frozen = [doc.getElementById('proj-freeze-btn').textContent, doc.getElementByI
 await g.toggleProjectFreeze();
 r.unfreeze = [posts().pop(), toasts.pop()];
 let call = null;
-g.openConfirm = (msg, cb, opts) => { call = { msg, cb, opts }; };
+g.openModal = (o) => { call = { msg: o.body, cb: o.actions.find(a => a.primary).onClick, kill: o.actions[1].label }; };
 g.stopAllProject();
-r.confirm = [call.msg, call.opts.confirmLabel, doc.getElementById('proj-stopall-btn').disabled];
+r.confirm = [call.msg.includes('task.stopAllInProject'), call.kill, doc.getElementById('proj-stopall-btn').disabled];
 await call.cb();
 r.stopped = [posts().pop(), alerts.pop()[0], doc.getElementById('proj-stopall-btn').disabled];
 """,
@@ -219,7 +219,7 @@ r.stopped = [posts().pop(), alerts.pop()[0], doc.getElementById('proj-stopall-bt
     assert out["freeze"] == [["POST", "/api/project/freeze/p"], ["toast.projectBlocked", "ok"]]
     assert out["frozen"] == ["btn.unfreeze", "var(--ok)"]
     assert out["unfreeze"] == [["POST", "/api/project/unfreeze/p"], ["toast.projectUnblocked", "ok"]]
-    assert out["confirm"] == ["task.stopAllInProject", "btn.stopAll", True]
+    assert out["confirm"] == [True, "btn.killAll", True]
     assert out["stopped"] == [["POST", "/api/project/stop-all/p"], "alert.stoppedTasks", False]
 
 

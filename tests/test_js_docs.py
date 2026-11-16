@@ -164,3 +164,37 @@ console.log('RESULT:' + JSON.stringify(r));
     assert out["state"] == ["task-standards", "intro"]
     assert out["help"] == "none"
     assert out["tabs"] in (["docs"], [])
+
+
+def test_sections_nav_is_inserted_as_direct_sidebar_child_with_grouped_guides():
+    """Regression: grouped guides render a nested `.docs-sidebar-sub`; inserting before it threw NotFoundError
+    and every guide showed "Could not load this guide." (real DOMs throw, so assert the DOM shape)."""
+    out = run_js(
+        EV
+        + """
+const { g, doc, S } = await setup({ app: true, routes: {
+  '/docs/manifest.json': { guides: { guide: { capability: 'submit' } }, references: { cli: {} } },
+  '/docs/guide?format=json': { title: 'Guide', html: '<section id="s1"><h2>One</h2></section>' },
+} });
+await g.flush();
+g.CSS = { escape: s => s };
+await g.loadDocsPage(); await g.flush();
+const side0 = doc.getElementById('docs-sidebar');
+const grp = doc.createElement('div'); grp.classList.add('docs-capability-group');
+const nested = doc.createElement('div'); nested.classList.add('docs-sidebar-sub');
+grp.appendChild(nested); side0.children.unshift(grp); grp.parentNode = side0;   // a nested heading, as grouped guides render
+await g.loadDoc('guide', { replace: true, force: true });
+const side = doc.getElementById('docs-sidebar');
+const label = doc.getElementById('docs-sections-label');
+const host = doc.getElementById('docs-nav-sections');
+const r = {
+  labelParentIsSidebar: !!label && label.parentNode === side,
+  hostParentIsSidebar: !!host && host.parentNode === side,
+  loaded: doc.getElementById('docs-content').dataset.docId,
+  failed: doc.getElementById('docs-content').innerHTML.includes('docs.loadFailed'),
+};
+console.log('RESULT:' + JSON.stringify(r));
+"""
+    )
+    assert out["labelParentIsSidebar"] and out["hostParentIsSidebar"]
+    assert out["loaded"] == "guide" and out["failed"] is False

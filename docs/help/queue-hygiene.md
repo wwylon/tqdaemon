@@ -31,3 +31,8 @@ approves.
 
 Related: `tq prune` deletes old **runs/logs** (retention); `tq archive` removes
 **task rows** from the live queue into `<home>/archive/`.
+
+Archive age is the task's `finished_at` (YAML sync rewrites `updated_at`). A finished
+task that an unfinished task still lists in `depends_on` / `depends_on_any` is **kept**
+(reported as "kept as dependency"): the scheduler blocks a task whose dependency row is
+missing. In the web UI, the project page's **Archive…** button previews the count first.

@@ -138,3 +138,46 @@ def test_bind_host_and_auth_config_defaults(tmp_path: Path) -> None:
     assert cfg.get("bind_host") == "127.0.0.1"
     assert cfg.get("auth_token") == ""
     assert cfg.get("prevent_sleep") == 1
+
+
+def test_export_scrubs_legacy_auth_token_unless_kept(tmp_path) -> None:
+    import sqlite3
+    import tarfile
+
+    from tqdaemon.db import open_db, set_config
+
+    home = tmp_path / "h"
+    home.mkdir()
+    conn = open_db(home / "queue.db")
+    set_config(conn, "auth_token", "s3cret")
+    conn.close()
+
+    def exported_token(archive) -> str:
+        out = tmp_path / archive.name.replace(".tar.gz", "")
+        with tarfile.open(archive) as tar:
+            tar.extractall(out, filter="data")
+        c = sqlite3.connect(str(out / "queue.db"))
+        try:
+            return c.execute("SELECT value FROM config WHERE key='auth_token'").fetchone()[0]
+        finally:
+            c.close()
+
+    # stored JSON-encoded: a raw '' would make get_config's json.loads fail on the imported DB
+    assert exported_token(export_home(home, tmp_path / "scrubbed.tar.gz", scrub_token=True)) == '""'
+    assert exported_token(export_home(home, tmp_path / "kept.tar.gz")) in ("s3cret", '"s3cret"')
+
+
+def test_scrubbed_export_imports_and_reads_config(tmp_path) -> None:
+    from tqdaemon.db import get_config, open_db, set_config
+
+    src = tmp_path / "src"
+    src.mkdir()
+    conn = open_db(src / "queue.db")
+    set_config(conn, "auth_token", "s3cret")
+    conn.close()
+    arc = export_home(src, tmp_path / "s.tar.gz", scrub_token=True)
+    dst = tmp_path / "dst"
+    import_home(dst, arc)
+    conn = open_db(dst / "queue.db")
+    assert get_config(conn).get("auth_token") in ("", None)
+    conn.close()

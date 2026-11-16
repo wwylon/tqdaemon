@@ -44,8 +44,13 @@ def export_home(
     *,
     with_logs: bool = False,
     allow_running_daemon: bool = False,
+    scrub_token: bool = False,
 ) -> Path:
-    """Pack projects.yaml + queue.db (+ optional logs/) into dest .tar.gz."""
+    """Pack projects.yaml + queue.db (+ optional logs/) into dest .tar.gz.
+
+    ``scrub_token`` blanks the legacy ``auth_token`` in the exported snapshot (S5): a backup or a
+    shared archive must not carry the live admin credential. Master migration keeps it (the target needs it).
+    """
     import io
 
     home = home.resolve()
@@ -79,6 +84,13 @@ def export_home(
         tmp_path = Path(tmp)
         snap = tmp_path / "queue.db"
         _backup_db(db, snap)
+        if scrub_token:
+            sc = sqlite3.connect(str(snap))
+            try:
+                sc.execute("UPDATE config SET value = ? WHERE key = 'auth_token'", (json.dumps(""),))
+                sc.commit()
+            finally:
+                sc.close()
         with tarfile.open(dest, "w:gz") as tar:
             data = json.dumps(manifest, indent=2).encode("utf-8")
             info = tarfile.TarInfo(MANIFEST_NAME)

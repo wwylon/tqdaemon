@@ -7,7 +7,7 @@
     },
     "admit": {
       "mcp": ["capacity", "why_not_running"],
-      "cli": ["plan", "why", "force", "priority", "pause", "resume", "freeze", "unfreeze", "set", "locks", "fair-share", "deps"]
+      "cli": ["plan", "why", "limits", "start-now", "force", "priority", "pause", "resume", "freeze", "unfreeze", "set", "locks", "fair-share", "deps", "lease", "gpu"]
     },
     "run": {
       "mcp": ["enqueue_task", "retry_task", "retry_tasks", "patch_task", "stop_task", "hold_task", "unhold_task"],
@@ -19,7 +19,7 @@
     },
     "diagnose": {
       "mcp": ["diagnose", "task_result", "report", "explain_error"],
-      "cli": ["diagnose", "explain", "metrics", "report", "hygiene", "diff", "health"]
+      "cli": ["diagnose", "hint", "explain", "metrics", "report", "hygiene", "diff", "health"]
     },
     "workers": {
       "mcp": [],
@@ -35,7 +35,7 @@
     },
     "admin": {
       "mcp": [],
-      "cli": ["archive", "prune", "export", "import", "migrate", "completion", "sleep", "wake", "release", "relocate"]
+      "cli": ["archive", "prune", "export", "import", "migrate", "completion", "sleep", "wake", "release", "relocate", "project", "drain"]
     }
   }
 }

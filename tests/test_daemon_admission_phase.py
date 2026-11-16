@@ -1,7 +1,17 @@
 """Daemon tick admission phase: cooldown freeze, CPU gate, reap-before-admit ordering."""
 
+import pytest
+
 import tqdaemon.scheduler as scheduler
 from tqdaemon import daemon
+
+
+@pytest.fixture(autouse=True)
+def _no_lease_processing(monkeypatch):
+    """These tests pass a sentinel connection; GPU lease processing (T-208) needs a real DB."""
+    import tqdaemon.leases as leases
+
+    monkeypatch.setattr(leases, "process_leases", lambda *a, **k: None)
 
 
 def _capture(monkeypatch):

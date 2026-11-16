@@ -206,7 +206,6 @@ _PROV_LOCAL = threading.local()
 
 def _provenance_conn(path: Path):
     """One read-only connection per thread and DB path (was a full open_db per event)."""
-    import sqlite3
 
     cache = getattr(_PROV_LOCAL, "conns", None)
     if cache is None:
@@ -214,8 +213,9 @@ def _provenance_conn(path: Path):
     key = str(path)
     conn = cache.get(key)
     if conn is None:
-        conn = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True, timeout=2.0)
-        conn.row_factory = sqlite3.Row
+        from tqdaemon.db import open_ro
+
+        conn = open_ro(path, timeout=2.0)
         cache[key] = conn
     return conn
 
@@ -266,7 +266,7 @@ def append_notify_event(home: Path, payload: dict[str, Any]) -> None:
 def _attempt_post(url: str, payload: dict[str, Any], *, allow_remote: bool = False) -> None:
     """One POST attempt; raises on any failure."""
     body = json.dumps(payload, default=str).encode("utf-8")
-    req = Request(
+    req = Request(  # noqa: S310
         url,
         data=body,
         headers={"Content-Type": "application/json"},

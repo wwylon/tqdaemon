@@ -126,7 +126,7 @@ def build_duration_index(
     """
     # Last _HISTORY_RUNS finished runs per task, durations computed in SQL.
     sql = (
-        "SELECT project, task_id, status, dur FROM ("
+        "SELECT project, task_id, status, dur FROM ("  # noqa: S608
         " SELECT project, task_id, status,"
         "  (CAST(strftime('%s', finished_at) AS REAL) - CAST(strftime('%s', started_at) AS REAL)) AS dur,"
         "  ROW_NUMBER() OVER (PARTITION BY project, task_id ORDER BY run_id DESC) AS rn"
@@ -249,15 +249,23 @@ def _load_candidates(
     hours: int,
     now: datetime,
     index: dict[str, Any],
-) -> tuple[list[_Cand], set[tuple[str, str]]]:
-    """Return (candidates, already-completed keys from DB)."""
+) -> tuple[list[_Cand], set[tuple[str, str]], dict[str, Any]]:
+    """Return (candidates, already-completed keys, extra).
+
+    ``extra``: ``hidden`` (queued tasks skipped up front: paused/frozen project) and
+    ``status`` ((project, task_id) -> status, for explaining unmet dependencies).
+    """
     completed: set[tuple[str, str]] = set()
+    status_by_key: dict[tuple[str, str], str] = {}
     for row in conn.execute(
-        "SELECT project, task_id, status FROM tasks" + (" WHERE project = ?" if project else ""),
+        "SELECT project, task_id, status FROM tasks" + (" WHERE project = ?" if project else ""),  # noqa: S608
         (project,) if project else (),
     ).fetchall():
+        k = (row["project"] or "", row["task_id"] or "")
+        status_by_key[k] = str(row["status"] or "")
         if row["status"] == "completed":
-            completed.add((row["project"] or "", row["task_id"] or ""))
+            completed.add(k)
+    hidden: list[dict[str, str]] = []
 
     sql = (
         "SELECT project, task_id, status, priority, enqueued_at, depends_on, depends_on_any, "
@@ -289,6 +297,10 @@ def _load_candidates(
     prior_secs = bulk_prior_run_seconds(conn, open_runs)
 
     blocked = set(blocked_projects(conn))
+    frozen = {
+        str(r[0])[len("project_frozen_") :]
+        for r in conn.execute("SELECT key FROM config WHERE key GLOB 'project_frozen_*'").fetchall()
+    }
 
     live_rows = list(conn.execute(sql, args).fetchall())
     # Cron arrivals within the forward window
@@ -332,6 +344,9 @@ def _load_candidates(
         seen.add(key)
         # Paused/frozen projects admit nothing new; only already-running tasks matter.
         if row["status"] != "running" and proj in blocked:
+            hidden.append(
+                {"project": proj, "task_id": tid, "reason": "frozen" if proj in frozen else "paused", "detail": ""}
+            )
             continue
         res = _parse_json_dict(row["resources"])
         est = _est(proj, tid, res)
@@ -421,7 +436,37 @@ def _load_candidates(
         )
         seen.add(key)
 
-    return cands, completed
+    return cands, completed, {"hidden": hidden, "status": status_by_key}
+
+
+def _not_shown_reason(
+    cand: _Cand, completed: set[tuple[str, str]], status: dict[tuple[str, str], str]
+) -> dict[str, str]:
+    """Why a queued task got no bar: a dead dependency, a live unmet one, or simply later than the window."""
+    from tqdaemon.statuses import DEAD_DEP_STATUSES
+
+    def _dead(ref: Any) -> str | None:
+        k = _dep_key(ref, cand.project)
+        st = status.get(k)
+        if k in completed:
+            return None
+        if st is None and k[0] == cand.project:
+            return f"{k[1]} [missing]"
+        if st in DEAD_DEP_STATUSES:
+            return f"{k[1] if k[0] == cand.project else k[0] + '/' + k[1]} [{st}]"
+        return None
+
+    for ref in cand.depends_on or []:
+        d = _dead(ref)
+        if d:
+            return {"reason": "dead_dep", "detail": d}
+    if cand.depends_on_any:
+        deads = [_dead(r) for r in cand.depends_on_any]
+        if all(deads) and not any(_dep_key(r, cand.project) in completed for r in cand.depends_on_any):
+            return {"reason": "dead_dep", "detail": ", ".join(str(d) for d in deads)}
+    if not _deps_ok(cand, completed):
+        return {"reason": "deps_unmet", "detail": ""}
+    return {"reason": "beyond_window", "detail": ""}
 
 
 def _deps_ok(cand: _Cand, completed: set[tuple[str, str]]) -> bool:
@@ -458,7 +503,7 @@ def forecast_timeline(
     window_end = t0 + timedelta(hours=hours)
 
     index = build_duration_index(conn, project=project)
-    candidates, completed = _load_candidates(
+    candidates, completed, extra = _load_candidates(
         conn,
         project=project,
         hours=hours,
@@ -689,6 +734,16 @@ def forecast_timeline(
     bars.sort(key=lambda b: (b["start_sec"], b["lane"], b["project"], b["task_id"]))
     for i, bar in enumerate(bars, start=1):
         bar["order"] = i
+    # Queued tasks with no bar, and why (paused/frozen project, dead or unmet dependency, later than the window).
+    shown = {(b["project"], b["task_id"]) for b in bars}
+    not_shown = list(extra["hidden"])
+    for cand in candidates:
+        if cand.kind != "queued" or (cand.project, cand.task_id) in shown:
+            continue
+        not_shown.append(
+            {"project": cand.project, "task_id": cand.task_id, **_not_shown_reason(cand, completed, extra["status"])}
+        )
+    not_shown.sort(key=lambda x: (x["reason"], x["project"], x["task_id"]))
     return {
         "hours": hours,
         "window_start": _iso(t0),
@@ -697,6 +752,7 @@ def forecast_timeline(
         "bunch_end_sec": round(raw_bunch_end, 1),
         "bunch_end_at": _iso(t0 + timedelta(seconds=raw_bunch_end)) if raw_bunch_end > 0 else None,
         "bars": bars,
+        "not_shown": not_shown,
     }
 
 
@@ -730,12 +786,12 @@ def _state_token(conn: sqlite3.Connection, project: str | None) -> tuple:
     w = " WHERE project = ?" if project else ""
     a = (project,) if project else ()
     rows = conn.execute(
-        "SELECT status, COUNT(*), COALESCE(SUM(priority),0), COALESCE(SUM(enabled),0), "
+        "SELECT status, COUNT(*), COALESCE(SUM(priority),0), COALESCE(SUM(enabled),0), "  # noqa: S608
         "MAX(enqueued_at) FROM tasks" + w + " GROUP BY status",
         a,
     ).fetchall()
     run_w = " WHERE project = ?" if project else ""
-    last_run = conn.execute("SELECT MAX(run_id) FROM runs" + run_w, a).fetchone()[0]
+    last_run = conn.execute("SELECT MAX(run_id) FROM runs" + run_w, a).fetchone()[0]  # noqa: S608
     blocked = tuple(
         sorted(
             r["key"]

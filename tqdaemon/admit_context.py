@@ -199,7 +199,7 @@ def build_admit_context(
     proj = str(row["project"])
     task_id = str(row["task_id"])
     frozen, paused, limits = caches.project_state(conn, proj)
-    force = bool(row["force_run"]) if has_col(row, "force_run") else False
+    force = (int(row["force_run"] or 0) if has_col(row, "force_run") else 0) == 1  # 2 = Start now, not a bypass
     max_a = int(row["max_attempts"] or 0) if has_col(row, "max_attempts") else 0
     if max_a > 0:
         if attempt_counts is not None:

@@ -11,6 +11,19 @@ from tqdaemon.resources import ResourceBudget, detect_system, ram_used_gib
 from tqdaemon.rows import has_col, row_get
 
 
+def _gpu_leases(conn: Any) -> list[dict[str, Any]]:
+    """T-208: active/waiting ad-hoc GPU leases (R4 visibility)."""
+    from tqdaemon.leases import list_leases
+
+    try:
+        return [
+            {k: v for k, v in lease.items() if k in ("id", "status", "vram_gib", "priority", "holder", "expires_at")}
+            for lease in list_leases(conn)
+        ]
+    except sqlite3.Error:
+        return []
+
+
 def build_capacity(
     conn: sqlite3.Connection,
     cfg: dict[str, Any] | None = None,
@@ -195,4 +208,5 @@ def build_capacity(
         },
         "workers": workers_out,
         "running_reservations": reservations,
+        "gpu_leases": _gpu_leases(conn),
     }

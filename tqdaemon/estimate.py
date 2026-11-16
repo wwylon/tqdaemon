@@ -26,6 +26,9 @@ from tqdaemon.rows import row_get
 # How many recent runs feed a prediction, unless config overrides.
 DEFAULT_PREDICT_RUNS = 5
 
+# A top peak above this multiple of the runner-up counts as an outlier in _p95.
+OUTLIER_FACTOR = 3.0
+
 # Estimate provenance, ordered weakest to strongest confidence.
 SOURCE_DEFAULT = "default"
 SOURCE_GROUP = "group"
@@ -40,6 +43,11 @@ def _p95(values: list[float]) -> float:
     vals = sorted(v for v in values if v is not None and v > 0)
     if not vals:
         return 0.0
+    # One wild sample (mis-attributed process tree, co-tenant on the host) must
+    # not become the hint for hours: with >=3 points drop a top value that is
+    # more than OUTLIER_FACTOR x the next one. Operators can also `tq hint reset`.
+    if len(vals) >= 3 and vals[-1] > OUTLIER_FACTOR * vals[-2]:
+        vals = vals[:-1]
     idx = math.ceil(0.95 * (len(vals) - 1))
     return float(vals[min(idx, len(vals) - 1)])
 
@@ -47,7 +55,7 @@ def _p95(values: list[float]) -> float:
 def _peaks_for(conn: sqlite3.Connection, where: str, params: tuple, limit: int) -> tuple[list[float], list[float]]:
     """Return (ram_peaks, vram_peaks) for runs matching *where*."""
     rows = conn.execute(
-        "SELECT r.peak_ram_gib, r.peak_vram_gib "
+        "SELECT r.peak_ram_gib, r.peak_vram_gib "  # noqa: S608
         "FROM runs r JOIN tasks t ON t.project = r.project AND t.task_id = r.task_id "
         f"WHERE {where} "
         "  AND (r.peak_ram_gib IS NOT NULL OR r.peak_vram_gib IS NOT NULL) "
@@ -85,7 +93,7 @@ def prefetch_exact_peaks(
         placeholders = ",".join("(?)" for _ in part)
         tokens = [f"{p}/{t}" for p, t in part]
         rows = conn.execute(
-            "SELECT project, task_id, peak_ram_gib, peak_vram_gib FROM ("
+            "SELECT project, task_id, peak_ram_gib, peak_vram_gib FROM ("  # noqa: S608
             " SELECT r.project, r.task_id, r.peak_ram_gib, r.peak_vram_gib,"
             "  ROW_NUMBER() OVER (PARTITION BY r.project, r.task_id ORDER BY r.run_id DESC) AS rn"
             " FROM runs r"
@@ -185,6 +193,26 @@ def predict_task_resources(
     return {"ram_gib": 0.0, "vram_gib": 0.0, "source": SOURCE_DEFAULT}
 
 
+def explain_ram_hint(
+    conn: sqlite3.Connection, project: str, task_id: str, declared: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Where a task's RAM hint comes from (``tq hint show``): the estimate plus the raw samples.
+
+    ``dropped_outlier`` is the top peak ``_p95`` ignored, if any.
+    """
+    ram, _ = _peaks_for(conn, "r.project = ? AND r.task_id = ?", (project, task_id), DEFAULT_PREDICT_RUNS)
+    est = estimate_task_resources(conn, project, task_id, declared)
+    vals = sorted(v for v in ram if v and v > 0)
+    dropped = vals[-1] if len(vals) >= 3 and vals[-1] > OUTLIER_FACTOR * vals[-2] else None
+    return {
+        "ram_gib": est["ram_gib"],
+        "source": est["source"],
+        "declared_ram_gib": float((declared or {}).get("ram_gib") or 0.0),
+        "own_peaks_gib": ram,
+        "dropped_outlier": dropped,
+    }
+
+
 ESTIMATE_CACHE_MAX = 5000
 
 
@@ -232,6 +260,17 @@ def estimate_task_resources(
         exact_peaks=exact_peaks,
         exact_checked=exact_checked,
     )
+
+    # A declared value beats a *proxy* (sibling/group history of other tasks): the
+    # operator's own number is better evidence than another task's peak, and one
+    # bad sibling sample must not block a task that declared its footprint.
+    pred_ram, pred_vram = pred["ram_gib"], pred["vram_gib"]
+    if pred["source"] in (SOURCE_SIBLING, SOURCE_GROUP):
+        if dec_ram > 0:
+            pred_ram = 0.0
+        if dec_vram > 0:
+            pred_vram = 0.0
+    pred = {**pred, "ram_gib": pred_ram, "vram_gib": pred_vram}
 
     ram = max(dec_ram, pred["ram_gib"], float(default_ram_gib))
     vram = max(dec_vram, pred["vram_gib"])

@@ -2,7 +2,8 @@
 
 Daemon
   tq start                          Start the daemon (background, detached)
-  tq stop-daemon                    Ask daemon to shut down gracefully
+  tq stop-daemon [--force] [--keep-runs]  Ask daemon to shut down gracefully (--keep-runs: adoptable runs keep running)
+  tq drain [on | off | status]      Stop starting new tasks (running ones finish); for a slow restart
   tq restart [--force]              Stop (wait for exit) then start; refuses while tasks run (adoptable runs survive)
   tq doctor [--json] [--torch] [--fix|--dry-run]     Health; --fix/--dry-run list remediations (no writes)
   tq log [--bytes N] [--grep PAT]   Tail daemon.log (scheduler stdout; not task logs)
@@ -31,12 +32,13 @@ Inspect queue
 
 Tasks
   tq sync [PROJECT ...] [--force] [--require-daemon]  Re-sync registered project YAML dirs (exit 3 offline)
-  tq archive [PROJECT ...] [--older-than 30d] [--status completed,failed] [--max-completed-runs N] [--dry-run]
+  tq archive [PROJECT ...] [--older-than 30d] [--status completed,failed] [--max-completed-runs N] [--task-glob PATTERN] [--dry-run]
                                     Export old finished tasks to <home>/archive/*.jsonl and drop them from the queue
   tq add <yaml> --project P         Enqueue from a YAML file (via master HTTP)
   tq submit <yaml> --project P      Alias for add
   tq validate [--fix] [path.yaml]  Lint YAMLs; --fix rewrites legacy keys in place
   tq stop <project/task_id> [--force]  Graceful stop (checkpoints first)
+  tq stop <project/task_id> --now   Hard stop: kill the process tree immediately (also --project P --now)
   tq stop --project P               Stop all running tasks in project P
   tq suspend <project/task_id>      Cooperative suspend (exit 75)
   tq hold <project/task_id> [--for SEC] [--reason TEXT]
@@ -49,6 +51,8 @@ Tasks
                                     Enable root→target, disable other downstream, retry
   tq locks [--json]                 Active resource locks, holders, waiters
   tq force <project/task_id>        Bypass resource gates once
+  tq start-now <project/task_id>    Start first in line, ignoring RAM/VRAM held for other tasks
+  tq limits [NODE [field=val …]]    Limits tree all > sets > projects (NODE: all | set path | project)
   tq remove <project/task_id> [--force]  Unregister from DB
   tq remove --project P [--force]        Purge all tasks+runs for project P from DB
   tq patch <project/task_id> k=v…   Patch priority|enabled|wall_clock_cap_sec|max_attempts
@@ -60,6 +64,10 @@ Tasks
   tq result <project/task_id>       Last non-empty log line (exit 0 iff completed)
   tq tail <project/task_id> [--last N]  Follow log, or dump last N lines and exit
   tq diagnose <project/task_id>     Task + runs + log tail + worker bundle
+  tq lease acquire --vram GiB [--ttl SEC] | release <id> | list   Ad-hoc GPU leases admitted by the scheduler
+  tq gpu run --vram GiB [--ttl SEC] -- <cmd>  Run a command under a GPU lease (waits, runs, releases)
+  tq hint show <project/task_id>    Explain where a task's RAM hint comes from
+  tq hint reset <project/task_id> [--run N]  Clear bad peak RAM/VRAM samples feeding admission hints
   tq explain <error_code>           Describe a tq.* error / block code
   tq deps <project/task_id> [--mermaid]  Dependency tree
   tq tag add|rm <project/task_id> <tags…>
@@ -73,6 +81,8 @@ Projects
   tq pause|resume <project>         Pause / resume scheduling
   tq freeze|unfreeze <project>      Freeze / unfreeze project
   tq release <project>              Drop queue-dir watch (Windows folder move)
+  tq project rename <old> <new> [--dry-run] [--no-alias]  Rename a project id with its history (alias keeps the old name working)
+  tq project alias [list | rm <old>]  Old project names that still resolve
   tq relocate <project> <new_root>  Rewrite root + yaml_source after a move
   tq suite list|…                   Named suites
   tq bundle <project>               Create a project bundle
@@ -95,7 +105,7 @@ Config / maintenance
   tq migrate priority-invert [--dry-run]  Remap priorities 100-N (once per home)
   tq completion bash|zsh|pwsh       Print a shell completion script (e.g. tq completion bash >> ~/.bashrc)
   tq prune [--apply] [--verbose]    Delete old logs/runs (dry-run default)
-  tq export [path.tar.gz] [--with-logs]
+  tq export [path.tar.gz] [--with-logs] [--with-token]
   tq import <path.tar.gz> [--force]
   tq token generate                 Create and store auth_token
   tq usage                          CLI command usage counts
@@ -205,10 +215,20 @@ def _cmd_start(home: Path, rest: list[str]) -> int:
 
 def _cmd_stop_daemon(home: Path, rest: list[str]) -> int:
     force = "--force" in rest
-    bad = _reject_args("stop-daemon [--force]", [a for a in rest if a != "--force"])
+    keep_runs = "--keep-runs" in rest
+    bad = _reject_args("stop-daemon [--force] [--keep-runs]", [a for a in rest if a not in ("--force", "--keep-runs")])
     if bad is not None:
         return bad
-    return cmd_stop_daemon(home, force=force) or 0
+    return cmd_stop_daemon(home, force=force, keep_runs=keep_runs) or 0
+
+
+def _cmd_drain(home: Path, rest: list[str]) -> int:
+    from tqdaemon._cli_admin import cmd_drain
+
+    if len(rest) > 1 or (rest and rest[0] not in ("on", "off", "status")):
+        print("Usage: tq drain [on | off | status]")
+        return 1
+    return cmd_drain(home, rest[0] if rest else "status")
 
 
 def _cmd_restart(home: Path, rest: list[str]) -> int:
@@ -324,16 +344,13 @@ def _cmd_sync(home: Path, rest: list[str]) -> int:
     require_daemon, rest = _pop_flag(rest, "--require-daemon")
     force, rest = _pop_flag(rest, "--force")
     # README spelling: ``tq sync --project NAME`` is the same as ``tq sync NAME``.
-    flat: list[str] = []
-    i = 0
-    while i < len(rest):
-        if rest[i] == "--project" and i + 1 < len(rest):
-            flat.append(rest[i + 1])
-            i += 2
-            continue
-        flat.append(rest[i])
-        i += 1
-    rest = flat
+    from tqdaemon.flagparse import FlagError, parse_flags
+
+    try:
+        opts, pos = parse_flags(rest, repeat=["project"])
+    except FlagError:  # a trailing "--project" without a value stays an (unknown) option, as before
+        opts, pos = {"project": []}, rest
+    rest = [*opts["project"], *pos]  # type: ignore[misc]
     bad = [a for a in rest if a.startswith("-")]
     if bad:
         print(f"Unknown option(s): {' '.join(bad)}")
@@ -347,21 +364,24 @@ def _cmd_archive(home: Path, rest: list[str]) -> int:
 
     usage = (
         "Usage: tq archive [PROJECT ...] [--older-than 30d] [--status completed,failed] "
-        "[--max-completed-runs N] [--dry-run]"
+        "[--max-completed-runs N] [--task-glob PATTERN] [--dry-run]"
     )
     dry_run, rest = _pop_flag(rest, "--dry-run")
     days = 30.0
     statuses: list[str] | None = None
     max_completed_runs: int | None = None
+    task_glob: str | None = None
     projects: list[str] = []
     i = 0
     while i < len(rest):
         a = rest[i]
-        if a in ("--older-than", "--status", "--project", "--max-completed-runs") and i + 1 < len(rest):
+        if a in ("--older-than", "--status", "--project", "--max-completed-runs", "--task-glob") and i + 1 < len(rest):
             v = rest[i + 1]
             i += 2
             if a == "--project":
                 projects.append(v)
+            elif a == "--task-glob":
+                task_glob = v
             elif a == "--status":
                 statuses = [x for x in v.split(",") if x]
             elif a == "--max-completed-runs":
@@ -389,43 +409,30 @@ def _cmd_archive(home: Path, rest: list[str]) -> int:
         statuses=statuses,
         dry_run=dry_run,
         max_completed_runs=max_completed_runs,
+        task_glob=task_glob,
     )
 
 
 def _cmd_retry(home: Path, rest: list[str]) -> int:
     # R2: collect --set flags before project-popping
-    set_args: list[str] = []
-    rest_no_set: list[str] = []
-    downstream = False
-    enable_downstream = False
-    status_filter: str | None = None
-    i = 0
-    while i < len(rest):
-        if rest[i] == "--set" and i + 1 >= len(rest):
-            print("Error: --set requires a value (--flag or --flag=value)")
-            return 1
-        if rest[i] == "--set" and i + 1 < len(rest):
-            set_args.append(rest[i + 1])
-            i += 2
-        elif rest[i].startswith("--set="):
-            set_args.append(rest[i][len("--set=") :])
-            i += 1
-        elif rest[i] in ("--downstream", "-d"):
-            downstream = True
-            i += 1
-        elif rest[i] == "--enable-downstream":
-            enable_downstream = True
-            i += 1
-        elif rest[i] == "--status" and i + 1 < len(rest):
-            status_filter = rest[i + 1]
-            i += 2
-        elif rest[i].startswith("--status="):
-            status_filter = rest[i][len("--status=") :]
-            i += 1
-        else:
-            rest_no_set.append(rest[i])
-            i += 1
-    rest = rest_no_set
+    from tqdaemon.flagparse import FlagError, parse_flags
+
+    try:
+        opts, rest = parse_flags(
+            rest,
+            bools=["downstream", "enable-downstream", "force"],
+            values=["status"],
+            repeat=["set"],
+            aliases={"-d": "--downstream"},
+        )
+    except FlagError as exc:
+        print(f"Error: {exc} (--flag or --flag=value)" if "--set" in str(exc) else f"Error: {exc}")
+        return 1
+    set_args: list[str] = list(opts["set"])  # type: ignore[arg-type]
+    downstream = bool(opts["downstream"])
+    enable_downstream = bool(opts["enable-downstream"])
+    force = bool(opts["force"])
+    status_filter: str | None = opts.get("status") or None  # type: ignore[assignment]
     project, rest2 = _pop_project(rest)
     if project and rest2:
         print("Error: --project and explicit task ID are mutually exclusive")
@@ -455,9 +462,10 @@ def _cmd_retry(home: Path, rest: list[str]) -> int:
             set_args=set_args or None,
             downstream=downstream,
             enable_downstream=enable_downstream,
+            force=force,
         )
     print(
-        "Usage: tq retry <project/task_id>… [--downstream] [--enable-downstream] "
+        "Usage: tq retry <project/task_id>… [--downstream] [--enable-downstream] [--force] "
         "[--set --flag=val ...] | tq retry --project P [--status STATUS]"
     )
     return 1
@@ -476,19 +484,20 @@ def _cmd_add(home: Path, rest: list[str]) -> int:
 def _cmd_stop(home: Path, rest: list[str]) -> int:
     project, rest2 = _pop_project(rest)
     force, rest2 = _pop_flag(rest2, "--force")
+    hard, rest2 = _pop_flag(rest2, "--now")
     stop_reason, rest2 = _pop_value(rest2, "--reason")
-    usage = "tq stop <project/task_id> [--force] [--reason TEXT] | tq stop --project P"
+    usage = "tq stop <project/task_id> [--now] [--force] [--reason TEXT] | tq stop --project P [--now]"
     if project and rest2:
         print("Error: --project and explicit task ID are mutually exclusive")
         return 1
     if project and not rest2:
-        return cmd_stop_project(home, project)
+        return cmd_stop_project(home, project, hard=hard)
     if rest2:
         key, *extra = rest2
         bad = _reject_leftover("stop", extra, usage=usage)
         if bad is not None:
             return bad
-        return cmd_stop(home, key, force=force, reason=stop_reason)
+        return cmd_stop(home, key, force=force, reason=stop_reason, hard=hard)
     print(f"Usage: {usage}")
     return 1
 
@@ -612,23 +621,22 @@ def _cmd_force(home: Path, rest: list[str]) -> int:
     return cmd_force(home, rest[0])
 
 
+def _cmd_start_now(home: Path, rest: list[str]) -> int:
+    if not rest:
+        print("Usage: tq start-now <project/task_id>")
+        return 1
+    return cmd_force(home, rest[0], start_now=True)
+
+
 def _cmd_reverify(home: Path, rest: list[str]) -> int:
-    up_to = None
-    key = None
-    i = 0
-    while i < len(rest):
-        a = rest[i]
-        if a == "--up-to" and i + 1 < len(rest):
-            up_to = rest[i + 1]
-            i += 2
-        elif a.startswith("--up-to="):
-            up_to = a.split("=", 1)[1]
-            i += 1
-        elif not a.startswith("-") and key is None:
-            key = a
-            i += 1
-        else:
-            i += 1
+    from tqdaemon.flagparse import FlagError, parse_flags
+
+    try:
+        opts, pos = parse_flags(rest, values=["up-to"])
+    except FlagError:
+        opts, pos = {"up-to": None}, []
+    up_to = opts["up-to"]
+    key = next((a for a in pos if not a.startswith("-")), None)
     if not key or not up_to:
         print("Usage: tq reverify <project/root_task_id> --up-to <task_id>")
         return 1
@@ -966,6 +974,57 @@ def _cmd_diagnose(home: Path, rest: list[str]) -> int:
     return cmd_diagnose(home, rest[0])
 
 
+def _cmd_hint(home: Path, rest: list[str]) -> int:
+    usage = "Usage: tq hint show <project/task_id> | tq hint reset <project/task_id> [--run N]"
+    if len(rest) == 2 and rest[0] == "show":
+        return cmd_hint_show(home, rest[1])
+    if len(rest) < 2 or rest[0] != "reset":
+        print(usage)
+        return 1
+    run_id: int | None = None
+    if "--run" in rest:
+        i = rest.index("--run")
+        try:
+            run_id = int(rest[i + 1])
+        except (IndexError, ValueError):
+            print(usage)
+            return 1
+    return cmd_hint_reset(home, rest[1], run_id=run_id)
+
+
+def _cmd_project(home: Path, rest: list[str]) -> int:
+    from tqdaemon._cli_project import cmd_project_alias, cmd_project_rename
+    from tqdaemon.flagparse import FlagError, parse_flags
+
+    usage = "Usage: tq project rename <old> <new> [--dry-run] [--no-alias] | tq project alias [list | rm <old>]"
+    if rest[:1] == ["alias"]:
+        return cmd_project_alias(home, rest[1:])
+    if rest[:1] != ["rename"]:
+        print(usage)
+        return 1
+    try:
+        opts, pos = parse_flags(rest[1:], bools=["dry-run", "no-alias"])
+    except FlagError:
+        print(usage)
+        return 1
+    if len(pos) != 2:
+        print(usage)
+        return 1
+    return cmd_project_rename(home, pos[0], pos[1], dry_run=bool(opts["dry-run"]), alias=not opts["no-alias"])
+
+
+def _cmd_lease(home: Path, rest: list[str]) -> int:
+    from tqdaemon._cli_lease import cmd_lease
+
+    return cmd_lease(home, rest)
+
+
+def _cmd_gpu(home: Path, rest: list[str]) -> int:
+    from tqdaemon._cli_lease import cmd_gpu
+
+    return cmd_gpu(home, rest)
+
+
 def _cmd_explain(home: Path, rest: list[str]) -> int:
     """tq explain <error_code> — describe a stable tq.* code (F-M7 / C-004)."""
     if not rest or rest[0] in ("-h", "--help"):
@@ -1014,8 +1073,9 @@ def _cmd_metrics(home: Path, rest: list[str]) -> int:
 
 def _cmd_export(home: Path, rest: list[str]) -> int:
     with_logs = "--with-logs" in rest
+    with_token = "--with-token" in rest
     dest = next((a for a in rest if not a.startswith("--")), None)
-    return cmd_export(home, dest, with_logs=with_logs)
+    return cmd_export(home, dest, with_logs=with_logs, with_token=with_token)
 
 
 def _cmd_import(home: Path, rest: list[str]) -> int:
@@ -1066,19 +1126,13 @@ def _cmd_resync(home: Path, rest: list[str]) -> int:
         print("Usage: tq resync <project> [--worker <id>] [--all-workers]")
         return 1
     project = rest[0]
-    worker_id = None
-    all_workers = False
-    i = 1
-    while i < len(rest):
-        if rest[i] == "--worker" and i + 1 < len(rest):
-            worker_id = rest[i + 1]
-            i += 2
-        elif rest[i] == "--all-workers":
-            all_workers = True
-            i += 1
-        else:
-            i += 1
-    return cmd_resync(home, project, worker_id=worker_id, all_workers=all_workers)
+    from tqdaemon.flagparse import FlagError, parse_flags
+
+    try:
+        opts, _ = parse_flags(rest[1:], bools=["all-workers"], values=["worker"])
+    except FlagError:
+        opts = {"worker": None, "all-workers": False}
+    return cmd_resync(home, project, worker_id=opts["worker"], all_workers=bool(opts["all-workers"]))  # type: ignore[arg-type]
 
 
 def _cmd_projects(home: Path, rest: list[str]) -> int:
@@ -1088,6 +1142,12 @@ def _cmd_projects(home: Path, rest: list[str]) -> int:
 
 def _cmd_set(home: Path, rest: list[str]) -> int:
     return cmd_set(home, rest)
+
+
+def _cmd_limits(home: Path, rest: list[str]) -> int:
+    from tqdaemon._cli_project import cmd_limits
+
+    return cmd_limits(home, rest)
 
 
 def _cmd_bundle(home: Path, rest: list[str]) -> int:
@@ -1100,18 +1160,14 @@ def _cmd_bundle(home: Path, rest: list[str]) -> int:
 def _worker_service_cmd(home: Path, rest: list[str]) -> int:
     """tq worker install-service|uninstall-service [--worker-id ID] [--home DIR] (id defaults from worker.yaml)."""
     verb = rest[0]
-    worker_id_arg = None
-    home_arg = home
-    i = 1
-    while i < len(rest):
-        if rest[i] == "--worker-id" and i + 1 < len(rest):
-            worker_id_arg = rest[i + 1]
-            i += 2
-        elif rest[i] == "--home" and i + 1 < len(rest):
-            home_arg = Path(rest[i + 1])
-            i += 2
-        else:
-            i += 1
+    from tqdaemon.flagparse import FlagError, parse_flags
+
+    try:
+        opts, _ = parse_flags(rest[1:], values=["worker-id", "home"])
+    except FlagError:
+        opts = {"worker-id": None, "home": None}
+    worker_id_arg = opts["worker-id"]
+    home_arg = Path(str(opts["home"])) if opts["home"] else home
     if not worker_id_arg:
         conf_p = home_arg / "worker.yaml"
         if conf_p.is_file():
@@ -1131,154 +1187,96 @@ def _worker_service_cmd(home: Path, rest: list[str]) -> int:
     return int(fn(home_arg, worker_id_arg) or 0)
 
 
-def _cmd_worker(home: Path, rest: list[str]) -> int:
-    if not rest:
-        print("Usage: tq worker [list | remove <id> | setup --master <url> | --master <url> --worker-id <id>]")
+def _worker_flags(rest: list[str], *, values: tuple[str, ...]) -> tuple[dict[str, object], list[str]] | None:
+    """Parse ``tq worker <sub>`` flags; unknown ``--x`` tokens are ignored (as the old loops did)."""
+    from tqdaemon.flagparse import FlagError, parse_flags
+
+    try:
+        opts, pos = parse_flags(rest, values=values)
+    except FlagError as exc:
+        print(f"Error: {exc}")
+        return None
+    return opts, [x for x in pos if not x.startswith("--")]
+
+
+def _worker_sync_cmd(home: Path, rest: list[str]) -> int:
+    # tq worker sync [<worker_id>] [--master <url>] [--token T]; worker_id may precede or follow flags.
+    parsed = _worker_flags(rest[1:], values=("master", "token"))
+    if parsed is None:
         return 1
-    if rest[0] == "list":
-        return cmd_worker_list(home)
-    if rest[0] == "sync":
-        # tq worker sync [<worker_id>] [--master <url>] [--token T]
-        # worker_id may appear before or after flags.
-        master_url_arg = None
-        auth_token_arg = os.environ.get("TQ_AUTH_TOKEN")
-        worker_id_arg = None
-        i = 1
-        while i < len(rest):
-            if rest[i] == "--master" and i + 1 < len(rest):
-                master_url_arg = rest[i + 1]
-                i += 2
-            elif rest[i] == "--token" and i + 1 < len(rest):
-                auth_token_arg = rest[i + 1]
-                i += 2
-            elif not rest[i].startswith("--"):
-                worker_id_arg = rest[i]
-                i += 1
-            else:
-                i += 1
-        if not worker_id_arg:
-            print("Usage: tq worker sync <worker_id> [--master <url>] [--token T]")
-            return 1
-        return cmd_worker_sync(home, worker_id_arg, master_url=master_url_arg, auth_token=auth_token_arg)
-    if rest[0] == "remove":
-        if len(rest) < 2:
-            print("Usage: tq worker remove <worker_id>")
-            return 1
-        return cmd_worker_remove(home, rest[1])
-    if rest[0] == "outbox":
-        from tqdaemon._cli_worker import cmd_worker_outbox
+    opts, pos = parsed
+    worker_id = pos[0] if pos else None
+    if not worker_id:
+        print("Usage: tq worker sync <worker_id> [--master <url>] [--token T]")
+        return 1
+    token = opts["token"] or os.environ.get("TQ_AUTH_TOKEN")
+    return cmd_worker_sync(home, worker_id, master_url=opts["master"] or None, auth_token=token)
 
-        return cmd_worker_outbox(home, clear_quarantine="--clear-quarantine" in rest)
-    if rest[0] == "doctor":
-        from tqdaemon._cli_worker import cmd_worker_doctor
 
-        master_url_arg = None
-        i = 1
-        while i < len(rest):
-            if rest[i] == "--master" and i + 1 < len(rest):
-                master_url_arg = rest[i + 1]
-                i += 2
-            else:
-                i += 1
-        return cmd_worker_doctor(home, master_url=master_url_arg)
-    if rest[0] in ("install-service", "uninstall-service"):
-        return _worker_service_cmd(home, rest)
-    if rest[0] == "build-wheel":
-        return cmd_worker_build_wheel(home)
-    if rest[0] == "rotate-credential":
-        master_url_arg = None
-        auth_token_arg = os.environ.get("TQ_AUTH_TOKEN")
-        i = 1
-        while i < len(rest):
-            if rest[i] == "--master" and i + 1 < len(rest):
-                master_url_arg = rest[i + 1]
-                i += 2
-            elif rest[i] == "--token" and i + 1 < len(rest):
-                auth_token_arg = rest[i + 1]
-                i += 2
-            else:
-                i += 1
-        return cmd_worker_rotate_credential(home, master_url=master_url_arg, auth_token=auth_token_arg)
-    if rest[0] == "set-trust":
-        if len(rest) < 3:
-            print("Usage: tq worker set-trust <worker_id> <tier>")
-            return 1
-        return cmd_worker_set_trust(home, rest[1], rest[2])
-    if rest[0] == "config-master":
-        from tqdaemon._cli_worker import cmd_worker_config_master
+def _worker_doctor_cmd(home: Path, rest: list[str]) -> int:
+    from tqdaemon._cli_worker import cmd_worker_doctor
 
-        host = None
-        out = None
-        remote_only = False
-        port = None
-        i = 1
-        while i < len(rest):
-            if rest[i] == "--host" and i + 1 < len(rest):
-                host = rest[i + 1]
-                i += 2
-            elif rest[i] == "--out" and i + 1 < len(rest):
-                out = Path(rest[i + 1])
-                i += 2
-            elif rest[i] == "--port" and i + 1 < len(rest):
-                port = int(rest[i + 1])
-                i += 2
-            elif rest[i] == "--remote-only":
-                remote_only = True
-                i += 1
-            else:
-                i += 1
-        if not host:
-            print("Usage: tq worker config-master --host <ip-or-hostname> [--out path] [--port N]")
-            return 1
-        return cmd_worker_config_master(home, host=host, out=out, remote_only=remote_only, port=port)
-    if rest[0] == "setup":
-        from tqdaemon._cli_worker import cmd_worker_setup_from_join
+    parsed = _worker_flags(rest[1:], values=("master",))
+    if parsed is None:
+        return 1
+    return cmd_worker_doctor(home, master_url=parsed[0]["master"] or None)
 
-        master_url = None
-        worker_id = None
-        auth_token = os.environ.get("TQ_AUTH_TOKEN")
-        join_from = None
-        i = 1
-        while i < len(rest):
-            if rest[i] == "--master" and i + 1 < len(rest):
-                master_url = rest[i + 1]
-                i += 2
-            elif rest[i] == "--worker-id" and i + 1 < len(rest):
-                worker_id = rest[i + 1]
-                i += 2
-            elif rest[i] == "--token" and i + 1 < len(rest):
-                auth_token = rest[i + 1]
-                i += 2
-            elif rest[i] == "--from" and i + 1 < len(rest):
-                join_from = Path(rest[i + 1])
-                i += 2
-            else:
-                i += 1
-        if join_from is not None:
-            return cmd_worker_setup_from_join(home, join_from, worker_id)
-        if not master_url:
-            print("Usage: tq worker setup --from <join.yaml> [--worker-id <id>]")
-            print("   or: tq worker setup --master <url> [--worker-id <id>] [--token T]")
-            return 1
-        cmd_worker_setup(home, master_url, worker_id, auth_token=auth_token)
-        return 0
-    master_url = None
-    worker_id = None
-    auth_token = os.environ.get("TQ_AUTH_TOKEN")
-    i = 0
-    while i < len(rest):
-        if rest[i] == "--master" and i + 1 < len(rest):
-            master_url = rest[i + 1]
-            i += 2
-        elif rest[i] == "--worker-id" and i + 1 < len(rest):
-            worker_id = rest[i + 1]
-            i += 2
-        elif rest[i] == "--token" and i + 1 < len(rest):
-            auth_token = rest[i + 1]
-            i += 2
-        else:
-            i += 1
 
+def _worker_rotate_cmd(home: Path, rest: list[str]) -> int:
+    parsed = _worker_flags(rest[1:], values=("master", "token"))
+    if parsed is None:
+        return 1
+    opts = parsed[0]
+    token = opts["token"] or os.environ.get("TQ_AUTH_TOKEN")
+    return cmd_worker_rotate_credential(home, master_url=opts["master"] or None, auth_token=token)
+
+
+def _worker_config_master_cmd(home: Path, rest: list[str]) -> int:
+    from tqdaemon._cli_worker import cmd_worker_config_master
+    from tqdaemon.flagparse import FlagError, parse_flags
+
+    try:
+        opts, _ = parse_flags(rest[1:], bools=("remote-only",), values=("host", "out", "port"))
+    except FlagError as exc:
+        print(f"Error: {exc}")
+        return 1
+    if not opts["host"]:
+        print("Usage: tq worker config-master --host <ip-or-hostname> [--out path] [--port N]")
+        return 1
+    out = Path(str(opts["out"])) if opts["out"] else None
+    port = int(str(opts["port"])) if opts["port"] else None
+    return cmd_worker_config_master(
+        home, host=str(opts["host"]), out=out, remote_only=bool(opts["remote-only"]), port=port
+    )
+
+
+def _worker_setup_cmd(home: Path, rest: list[str]) -> int:
+    from tqdaemon._cli_worker import cmd_worker_setup_from_join
+
+    parsed = _worker_flags(rest[1:], values=("master", "worker-id", "token", "from"))
+    if parsed is None:
+        return 1
+    opts = parsed[0]
+    worker_id = str(opts["worker-id"]) if opts["worker-id"] else None
+    if opts["from"]:
+        return cmd_worker_setup_from_join(home, Path(str(opts["from"])), worker_id)
+    if not opts["master"]:
+        print("Usage: tq worker setup --from <join.yaml> [--worker-id <id>]")
+        print("   or: tq worker setup --master <url> [--worker-id <id>] [--token T]")
+        return 1
+    token = opts["token"] or os.environ.get("TQ_AUTH_TOKEN")
+    cmd_worker_setup(home, str(opts["master"]), worker_id, auth_token=token)
+    return 0
+
+
+def _worker_start_cmd(home: Path, rest: list[str]) -> int:
+    parsed = _worker_flags(rest, values=("master", "worker-id", "token"))
+    if parsed is None:
+        return 1
+    opts = parsed[0]
+    master_url = str(opts["master"]) if opts["master"] else None
+    worker_id = str(opts["worker-id"]) if opts["worker-id"] else None
+    auth_token = (str(opts["token"]) if opts["token"] else None) or os.environ.get("TQ_AUTH_TOKEN")
     if not master_url or not worker_id:
         conf_p = home / "worker.yaml"
         if conf_p.is_file():
@@ -1301,6 +1299,52 @@ def _cmd_worker(home: Path, rest: list[str]) -> int:
         return 1
     cmd_worker_start(home, master_url, worker_id, auth_token=auth_token)
     return 0
+
+
+def _worker_remove_cmd(home: Path, rest: list[str]) -> int:
+    if len(rest) < 2:
+        print("Usage: tq worker remove <worker_id>")
+        return 1
+    return cmd_worker_remove(home, rest[1])
+
+
+def _worker_set_trust_cmd(home: Path, rest: list[str]) -> int:
+    if len(rest) < 3:
+        print("Usage: tq worker set-trust <worker_id> <tier>")
+        return 1
+    return cmd_worker_set_trust(home, rest[1], rest[2])
+
+
+def _worker_outbox_cmd(home: Path, rest: list[str]) -> int:
+    from tqdaemon._cli_worker import cmd_worker_outbox
+
+    return cmd_worker_outbox(home, clear_quarantine="--clear-quarantine" in rest)
+
+
+_WORKER_SUBCOMMANDS = {
+    "list": lambda home, rest: cmd_worker_list(home),
+    "sync": _worker_sync_cmd,
+    "remove": _worker_remove_cmd,
+    "outbox": _worker_outbox_cmd,
+    "doctor": _worker_doctor_cmd,
+    "install-service": lambda home, rest: _worker_service_cmd(home, rest),
+    "uninstall-service": lambda home, rest: _worker_service_cmd(home, rest),
+    "build-wheel": lambda home, rest: cmd_worker_build_wheel(home),
+    "rotate-credential": _worker_rotate_cmd,
+    "set-trust": _worker_set_trust_cmd,
+    "config-master": _worker_config_master_cmd,
+    "setup": _worker_setup_cmd,
+}
+
+
+def _cmd_worker(home: Path, rest: list[str]) -> int:
+    if not rest:
+        print("Usage: tq worker [list | remove <id> | setup --master <url> | --master <url> --worker-id <id>]")
+        return 1
+    handler = _WORKER_SUBCOMMANDS.get(rest[0])
+    if handler is not None:
+        return handler(home, rest)
+    return _worker_start_cmd(home, rest)
 
 
 def _cmd_group(home: Path, rest: list[str]) -> int:
@@ -1891,6 +1935,8 @@ COMMANDS: dict[str, Callable[[Path, list[str]], int]] = {
     "relocate": _cmd_relocate,
     "patch": _cmd_patch,
     "force": _cmd_force,
+    "start-now": _cmd_start_now,
+    "limits": _cmd_limits,
     "reverify": _cmd_reverify,
     "locks": _cmd_locks,
     "remove": _cmd_remove,
@@ -1907,6 +1953,11 @@ COMMANDS: dict[str, Callable[[Path, list[str]], int]] = {
     "report": _cmd_report,
     "hygiene": _cmd_hygiene,
     "diagnose": _cmd_diagnose,
+    "hint": _cmd_hint,
+    "lease": _cmd_lease,
+    "project": _cmd_project,
+    "drain": _cmd_drain,
+    "gpu": _cmd_gpu,
     "explain": _cmd_explain,
     "metrics": _cmd_metrics,
     "export": _cmd_export,

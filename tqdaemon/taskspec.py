@@ -170,6 +170,24 @@ def validate_task_spec(raw: object, path: Path) -> None:
             raise ValueError(f"{name}: schedule.cron {_sched['cron']!r} is not a valid 5-field cron expression")
     res = raw.get("resources")
     if isinstance(res, dict):
+        unknown = sorted(str(k) for k in res if k not in _RESOURCE_KEYS)
+        gpu_like = [k for k in unknown if k in _GPU_LIKE_KEYS]
+        if gpu_like:
+            # A silently ignored GPU declaration lets two GPU jobs share the card: hard error.
+            raise ValueError(
+                f"{name}: unknown resources key(s): {', '.join(gpu_like)} ({_resource_key_hint(gpu_like[0])}). "
+                f"Allowed: {', '.join(sorted(_RESOURCE_KEYS))}"
+            )
+        if unknown:
+            # Other typos (cpu, ram_gb, ...) are ignored by the scheduler; warn, do not break a whole queue.
+            import warnings
+
+            warnings.warn(
+                f"{name}: unknown resources key(s) ignored: "
+                + "; ".join(f"{k} ({_resource_key_hint(k)})" for k in unknown),
+                UserWarning,
+                stacklevel=2,
+            )
         for key in ("cpu_cores", "ram_gib", "gpu_vram_gib"):
             val = res.get(key)
             if val is None:
@@ -180,6 +198,27 @@ def validate_task_spec(raw: object, path: Path) -> None:
                 ok = False
             if not ok:
                 raise ValueError(f"{name}: resources.{key} must be a non-negative number, got {val!r}")
+
+
+_RESOURCE_KEYS = frozenset({"cpu_cores", "ram_gib", "gpu_vram_gib", "locks"})
+_GPU_LIKE_KEYS = frozenset({"gpu", "vram", "vram_gib", "gpu_gib", "gpu_vram", "gpus"})
+_RESOURCE_KEY_HINTS = {
+    "ram_gb": "use resources.ram_gib",
+    "gpu_vram": "use resources.gpu_vram_gib",
+    "gpus": "use resources.gpu_vram_gib",
+    "gpu": "'gpu' is not a key — declare resources.gpu_vram_gib: <GiB of VRAM>",
+    "vram_gib": "use resources.gpu_vram_gib",
+    "vram": "use resources.gpu_vram_gib",
+    "gpu_gib": "use resources.gpu_vram_gib",
+    "ram": "use resources.ram_gib",
+    "cpu": "use resources.cpu_cores",
+    "cores": "use resources.cpu_cores",
+    "lock": "use resources.locks (a list)",
+}
+
+
+def _resource_key_hint(key: str) -> str:
+    return _RESOURCE_KEY_HINTS.get(key, f"{key!r} is ignored by the scheduler")
 
 
 def _parse_resources(raw: dict, path: Path) -> TaskResources:

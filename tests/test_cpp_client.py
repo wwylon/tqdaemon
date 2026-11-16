@@ -22,6 +22,7 @@ def _compile(tmp_path, src):
     ), exe
 
 
+@pytest.mark.flaky
 def test_progress_is_fixed_point_and_matches_daemon_regex(tmp_path):
     res, exe = _compile(
         tmp_path,

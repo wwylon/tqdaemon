@@ -50,7 +50,7 @@ def delta_e(a: str, b: str) -> float:
 
 def pick_color(used: list[str], seed: str, n: int = N_CANDIDATES) -> str:
     """Best of ``n`` random candidates: the one with the largest min-ΔE to ``used`` colors."""
-    rng = random.Random(int(hashlib.sha1(seed.encode("utf-8")).hexdigest()[:12], 16))
+    rng = random.Random(int(hashlib.sha1(seed.encode("utf-8"), usedforsecurity=False).hexdigest()[:12], 16))
     best, best_d = "", -1.0
     for _ in range(max(1, n)):
         h = rng.random()
@@ -74,7 +74,7 @@ def assign_project_colors(existing: dict[str, str], projects: list[str]) -> dict
 
 def hash_color(name: str) -> str:
     """Deterministic fallback for projects not yet assigned (used by the read path)."""
-    h = int(hashlib.sha1(name.encode("utf-8")).hexdigest()[:8], 16) / 0xFFFFFFFF
+    h = int(hashlib.sha1(name.encode("utf-8"), usedforsecurity=False).hexdigest()[:8], 16) / 0xFFFFFFFF
     return _hex(*colorsys.hls_to_rgb(h, 0.55, 0.7))
 
 

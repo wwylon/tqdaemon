@@ -24,7 +24,7 @@ from typing import Any
 
 from tqdaemon import config as tqconfig
 from tqdaemon import errors as tqerr
-from tqdaemon._db_runs import get_last_run_for_task, get_last_runs_for_tasks
+from tqdaemon._db_runs import FORCE_RUN, START_NOW, get_last_run_for_task, get_last_runs_for_tasks
 from tqdaemon._db_tasks import (
     count_online_workers,
     failed_attempt_counts_bulk,
@@ -173,7 +173,7 @@ def build_task_status_map(
     elif projects:
         marks = ",".join("?" for _ in projects)
         for row in conn.execute(
-            f"SELECT project, task_id FROM tasks WHERE project IN ({marks})",
+            f"SELECT project, task_id FROM tasks WHERE project IN ({marks})",  # noqa: S608
             tuple(projects),
         ):
             needed.add((str(row["project"]), str(row["task_id"])))
@@ -674,7 +674,7 @@ def worker_slot_reserved_many(
         return out
     marks = ",".join("?" for _ in ids)
     rows = conn.execute(
-        "SELECT r.worker_id, t.resources FROM tasks t "
+        "SELECT r.worker_id, t.resources FROM tasks t "  # noqa: S608
         "JOIN runs r ON r.project = t.project AND r.task_id = t.task_id "
         "AND r.status = 'running' "
         f"WHERE t.status = 'running' AND r.worker_id IN ({marks})",
@@ -817,7 +817,9 @@ def _p6_reserve_top(
         # soft-gate messages past physical total (live + hold > installed).
         _top_last = get_last_run_for_task(conn, *_top_key)
         _top_peak = float(_top_last["peak_ram_gib"] or 0.0) if _top_last else 0.0
-        _top_flap, _ = budget.antiflap_ram(_top_est["ram_gib"], _top_peak)
+        _top_flap, _ = budget.antiflap_ram(
+            _top_est["ram_gib"], capped_last_peak(_top_peak, float(_top_res.get("ram_gib", 0.0) or 0.0))
+        )
         if _top_flap:
             if reservation_state.get("key") == _top_key:
                 reservation_state.clear()
@@ -911,6 +913,14 @@ def _stop_excess(conn, home: Path, candidates: list, excess: int, describe, warn
         except Exception as exc:  # noqa: BLE001 - one stop failure must not stop the others
             print(f"[queue] {_ts()} warn: {warn_tag} {proj}/{tid}: {exc}", file=sys.stderr)
     return stopped
+
+
+def _force_mode(row: Any) -> int:
+    """tasks.force_run: 0 normal, FORCE_RUN (1) bypass soft gates, START_NOW (2) operator start."""
+    try:
+        return int(row["force_run"] or 0) if has_col(row, "force_run") else 0
+    except (TypeError, ValueError):
+        return 0
 
 
 def _enforce_excess_running(
@@ -1209,6 +1219,32 @@ def _resource_block(
     return code, (f"{fit_reason or 'insufficient resources'} [est_ram={ram:.1f} {vram_note} src={est['source']}]")
 
 
+def capped_last_peak(last_peak: float, declared_ram: float) -> float:
+    """C1: one wild sample on a task's own last run must not block it for hours.
+
+    When the task declares ``ram_gib``, its last peak counts at most ``max(2x, +4 GiB)`` of it.
+    Undeclared tasks keep the raw peak (nothing to anchor a cap on); ``tq hint reset`` clears it.
+    """
+    if declared_ram <= 0 or last_peak <= 0:
+        return last_peak
+    return min(last_peak, max(declared_ram * 2.0, declared_ram + 4.0))
+
+
+def _leased_vram(conn: sqlite3.Connection) -> float:
+    from tqdaemon.leases import active_vram
+
+    try:
+        return active_vram(conn)
+    except sqlite3.Error:  # table missing on a very old DB: no leases
+        return 0.0
+
+
+def _host_cpu_count() -> int:
+    import os
+
+    return os.cpu_count() or 1
+
+
 def _seed_budget_from_running(
     conn: sqlite3.Connection,
     rows: list,
@@ -1221,12 +1257,16 @@ def _seed_budget_from_running(
     predict_runs: int,
     settle_window: float,
     est_cache: dict,
+    charge_measured_cpu: bool = False,
+    leased_vram_gib: float = 0.0,
 ) -> None:
     """Reserve the unsettled footprint of our own running tasks in ``budget``.
 
     Local active_runs: reserve CPU only (RAM/VRAM already in live seed).
     Remotes: exclusive awareness only — do not drain master budget.
     """
+    declared_vram_total = float(leased_vram_gib)  # T-208: active GPU leases hold VRAM like declared tasks
+    reserved_vram_total = 0.0
     for row in rows:
         res_r = _parse_resources(row["resources"])
         key = (row["project"], row["task_id"])
@@ -1282,7 +1322,25 @@ def _seed_budget_from_running(
             # live seed alone is correct and a stale estimate must not keep
             # withholding memory forever.
             unsettled_ram = unsettled_vram = 0.0
-        budget.reserve(float(res_r.get("cpu_cores", 1)), unsettled_vram, unsettled_ram)
+        declared_vram_total += float(res_r.get("gpu_vram_gib", 0.0) or 0.0)
+        reserved_vram_total += unsettled_vram
+        cpu_charge = float(res_r.get("cpu_cores", 1))
+        if charge_measured_cpu:
+            # omnicard3 request: a task that declares 1 core but runs `cl /MP` is charged what it
+            # actually uses (current_cpu_pct is host-percent over the last sample window).
+            pct = getattr(run, "cpu_pct_ema", 0.0) or getattr(run, "current_cpu_pct", 0.0) or 0.0
+            measured = float(pct) / 100.0 * _host_cpu_count()
+            cpu_charge = max(cpu_charge, measured)
+        budget.reserve(cpu_charge, unsettled_vram, unsettled_ram)
+    # R1 (gpu-admit-hold) + C3: the declared VRAM of running local tasks is held for the whole run, also
+    # with settle_window_sec=0 or past the window, so a task still loading weights cannot let a second
+    # declared-5 GiB task onto a 6 GiB card. Reserve only the SHORTFALL of the declared total over what
+    # the budget already counts (live host VRAM + unsettled estimates): max(live, declared), never
+    # live + declared. Under Windows WDDM per-process VRAM is unreadable (nvidia-smi says N/A), so a
+    # per-task "declared - measured" hold would double-count the live reading.
+    shortfall = declared_vram_total - (float(budget.gpu_live) + reserved_vram_total)
+    if shortfall > 0:
+        budget.reserve(0.0, shortfall, 0.0)
 
 
 def _resettle_budget(budget: Any, live: float, *, admitted_ram: float) -> None:
@@ -1358,6 +1416,10 @@ def _local_admit_queued_body(
             "WHERE status IN ('queued','stopped') AND enabled = 1 GROUP BY project"
         ).fetchall():
             _queued_by_proj[_qr["project"]] = int(_qr["n"])
+    # Operator "Start now" (force_run=2) goes first in line — before the window cut, so a
+    # low-priority task the operator started is never truncated away. Stable: the rest keep order.
+    if any(_force_mode(r) == START_NOW for r in queued):
+        queued = sorted(queued, key=lambda r: _force_mode(r) != START_NOW)
     if _cand_window > 0 and len(queued) > _cand_window:
         queued = queued[:_cand_window]
     # T-204: scavengers go last so they only see capacity normal work left idle.
@@ -1390,6 +1452,7 @@ def _local_admit_queued_body(
             )
             break
     _admitted_this_tick = 0
+    _unload_url = str(cfg.get("ollama_unload_url") or "").strip()
     # G5: per-project measured footprint from settled unknown running tasks.
     _settled_unknown_footprint: dict[str, tuple[float, float]] = {}
     max_tasks = int(cfg.get("max_running_tasks", 0))
@@ -1414,6 +1477,8 @@ def _local_admit_queued_body(
         predict_runs=_predict_runs,
         settle_window=_settle_window,
         est_cache=_est_cache,
+        charge_measured_cpu=bool(int(cfg.get("cpu_charge_measured", 0) or 0)),
+        leased_vram_gib=_leased_vram(conn),
     )
 
     max_conc = int(cfg.get("max_concurrent_tasks", 0))
@@ -1501,7 +1566,8 @@ def _local_admit_queued_body(
         if project is None:
             # Task belongs to a project no longer in the registry — leave queued.
             continue
-        force = bool(row["force_run"]) if has_col(row, "force_run") else False
+        force = _force_mode(row) == FORCE_RUN
+        start_now = _force_mode(row) == START_NOW
         if _drain is not None and key != _drain[0] and not force and (_drain[1] is None or _drain[1] == row["project"]):
             _nb(
                 row["project"],
@@ -1671,7 +1737,7 @@ def _local_admit_queued_body(
         last_run = _last_runs.get(key)
         if not force:
             peak = float(last_run["peak_ram_gib"] or 0.0) if last_run else 0.0
-            flap, flap_reason = budget.antiflap_ram(ram, peak)
+            flap, flap_reason = budget.antiflap_ram(ram, capped_last_peak(peak, float(res.get("ram_gib", 0.0) or 0.0)))
             if flap:
                 _nb(
                     row["project"],
@@ -1685,6 +1751,11 @@ def _local_admit_queued_body(
         # task receives the credit; all other tasks (same project or cross-project)
         # see the hold as unavailable headroom.
         _hold_credit_ram, _hold_credit_gpu = p6_hold_credit(key, _p6_hold_key, _p6_hold_ram, _p6_hold_vram)
+        if start_now:
+            # Operator start: RAM/VRAM held for *other* waiting tasks (P6 top reservation,
+            # same-tick admissions not yet in live usage) does not count — only real usage does.
+            _hold_credit_ram = max(_hold_credit_ram, budget.ram_reserved - budget.ram_live)
+            _hold_credit_gpu = max(_hold_credit_gpu, budget.gpu_reserved - budget.gpu_live)
         ok, fit_reason = budget.fits(
             cpu,
             gpu,
@@ -1704,6 +1775,18 @@ def _local_admit_queued_body(
                 flush=True,
             )
             ok = True
+        if not ok and not force and gpu > 0 and _unload_url and (fit_reason or "").startswith("GPU:"):
+            # T-209 (opt-in): resident Ollama models may be what blocks this GPU task; ask them to unload.
+            from tqdaemon.ollama_unload import candidate_uses_ollama, maybe_unload
+
+            if not candidate_uses_ollama(row["requires_services"] if has_col(row, "requires_services") else None):
+                _gone = maybe_unload(_unload_url, allow_remote=bool(cfg.get("notify_allow_remote")))
+                if _gone:
+                    print(
+                        f"[queue] {_ts()} ollama unload: asked {', '.join(_gone)} to unload "
+                        f"(blocks {task_key(*key)} on VRAM)",
+                        flush=True,
+                    )
         if not ok and not force:
             block_code, block_note = _resource_block(
                 fit_reason,

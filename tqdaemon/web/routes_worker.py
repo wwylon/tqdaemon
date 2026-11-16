@@ -154,6 +154,10 @@ class WorkerRoutes:
                 _wheel_sha_cache["mtime"] = mtime
                 _wheel_sha_cache["sha256"] = sha256
             upgrade_url = "/api/worker/wheel"
+        from tqdaemon.auth import configured_token, sign_upgrade
+        from tqdaemon.web.responses import _get_auth_config
+
+        token = configured_token(_get_auth_config(self._rconn(), self._db_path))
         self._json(
             {
                 "version": _mv,
@@ -161,6 +165,7 @@ class WorkerRoutes:
                 "protocol": PROTOCOL_VERSION,
                 "upgrade_url": upgrade_url,
                 "sha256": sha256,
+                "sig": sign_upgrade(token, _mv, sha256) if (token and sha256) else None,
                 "wheel_name": wheel_path.name if upgrade_url else None,
             }
         )
@@ -503,6 +508,7 @@ class WorkerRoutes:
                 except (TypeError, ValueError):
                     pass
             stop_run_ids: list[int] = []
+            kill_run_ids: list[int] = []  # operator hard stop (stop_requested=2): kill without grace
             for run_id in run_ids:
                 renewed = renew_run_lease_for_worker(wdb, int(run_id), worker_id)
                 if not renewed:
@@ -520,6 +526,8 @@ class WorkerRoutes:
                 # while this worker still holds the child process.
                 if bool(row["stop_requested"]) or row["status"] != "running":
                     stop_run_ids.append(int(run_id))
+                    if int(row["stop_requested"] or 0) >= 2:
+                        kill_run_ids.append(int(run_id))
             stop_requested = bool(stop_run_ids)
         finally:
             wdb.close()
@@ -530,6 +538,8 @@ class WorkerRoutes:
         }
         if stop_run_ids:
             resp["stop_run_ids"] = stop_run_ids
+        if kill_run_ids:
+            resp["kill_run_ids"] = kill_run_ids
         if drain_and_stop:
             resp["drain_and_stop"] = True
             resp["reason"] = drain_reason
@@ -654,6 +664,11 @@ class WorkerRoutes:
         if worker["status"] == "offline":
             self._json({"task": None, "error": "Worker is offline; re-register first"})
             return
+        from tqdaemon.db import get_config as _get_cfg
+
+        if int(_get_cfg(self._rconn()).get("admission_drain", 0) or 0):
+            self._json({"task": None, "drain": True})  # `tq drain on`: nothing new starts, remote claims included
+            return
         from tqdaemon.fencing import session_id_mismatch
 
         stored_session = row_get(worker, "session_id")
@@ -726,7 +741,7 @@ class WorkerRoutes:
                 wdb = self._open_write_conn()
                 try:
                     wdb.execute(
-                        "UPDATE runs SET lease_expires_at = ? WHERE status = 'running' AND run_id IN (%s)"
+                        "UPDATE runs SET lease_expires_at = ? WHERE status = 'running' AND run_id IN (%s)"  # noqa: S608
                         % ",".join("?" * len(ids)),
                         (lease_expiry_iso(-1), *ids),
                     )
@@ -914,6 +929,8 @@ class WorkerRoutes:
                 if bool(row["stop_requested"]) or row["status"] != "running":
                     resp["stop_run_ids"] = [int(run_id)]
                     resp["stop_requested"] = True
+                    if int(row["stop_requested"] or 0) >= 2:
+                        resp["kill_run_ids"] = [int(run_id)]
         except (sqlite3.Error, TypeError, ValueError):
             pass
         self._json(resp)

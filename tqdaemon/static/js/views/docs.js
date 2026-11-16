@@ -203,7 +203,9 @@ export function _docsRenderSectionNav(content) {
       ? i18n.t('docs.onThisPage') : 'On this page';
     host = document.createElement('div');
     host.id = 'docs-nav-sections';
-    const refsLabel = [...sidebar.querySelectorAll('.docs-sidebar-sub')].find(el => el.id !== 'docs-sections-label');
+    // Direct children only: the guides list renders its own `.docs-sidebar-sub` heading one level down,
+    // and inserting before a non-child throws NotFoundError (the whole guide then "could not load").
+    const refsLabel = [...sidebar.children].find(el => el.classList.contains('docs-sidebar-sub') && el.id !== 'docs-sections-label');
     if (refsLabel) {
       sidebar.insertBefore(label, refsLabel);
       sidebar.insertBefore(host, refsLabel);
@@ -296,7 +298,8 @@ export async function loadDoc(docId, opts) {
       content.scrollTop = 0;
     }
     try { localStorage.setItem('tq_last_doc', docId); } catch (_) {}
-  } catch (_) {
+  } catch (err) {
+    console.warn('[tq] loadDoc failed:', docId, err);
     content.innerHTML = `<p>${escHtml(i18n.t('docs.loadFailed'))}</p>`;
     content.dataset.docId = '';
   }

@@ -18,7 +18,7 @@ from tqdaemon._time import _now  # noqa: F401  # canonical ISO timestamp helper
 from tqdaemon.deprefs import row_dep_refs
 from tqdaemon.models import STATUS_QUEUED, QueueTask, TaskResources  # noqa: F401
 from tqdaemon.project_limits import get_all_project_limits
-from tqdaemon.rows import has_col
+from tqdaemon.rows import has_col, row_resources
 
 SUBMIT_CHANNELS = frozenset({"cli", "mcp", "web", "api", "yaml", "daemon"})
 
@@ -51,7 +51,7 @@ def stamp_provenance(
     try:
         for tid in task_ids:
             conn.execute(
-                "UPDATE tasks SET submitted_via = ?, submitted_by = ?, client_info = ? "
+                "UPDATE tasks SET submitted_via = ?, submitted_by = ?, client_info = ? "  # noqa: S608
                 f"WHERE project = ? AND task_id = ? AND {guard}",
                 (via, by, client, project, tid),
             )
@@ -111,7 +111,7 @@ def run_counts(conn: sqlite3.Connection, pairs: list[tuple[str, str]]) -> dict[t
             chunk = ids[i : i + 400]
             ph = ",".join("?" * len(chunk))
             for r in conn.execute(
-                f"SELECT task_id, COUNT(*) AS n FROM runs WHERE project = ? AND task_id IN ({ph}) GROUP BY task_id",
+                f"SELECT task_id, COUNT(*) AS n FROM runs WHERE project = ? AND task_id IN ({ph}) GROUP BY task_id",  # noqa: S608
                 [project, *chunk],
             ):
                 out[(project, r["task_id"])] = int(r["n"])
@@ -153,7 +153,7 @@ def bulk_prior_run_seconds(
         placeholders = ",".join("(?, ?)" for _ in part)
         flat = [v for pair in part for v in pair]
         rows = conn.execute(
-            "SELECT project, task_id, run_id, status,"
+            "SELECT project, task_id, run_id, status,"  # noqa: S608
             " COALESCE(wall_sec,"
             "  CASE WHEN finished_at IS NOT NULL AND started_at IS NOT NULL"
             "       THEN MAX(0, (julianday(finished_at) - julianday(started_at)) * 86400.0)"
@@ -230,7 +230,7 @@ def failed_attempt_counts_bulk(
         marks = ",".join("(?, ?)" for _ in part)
         flat = [x for k in part for x in k]
         for r in conn.execute(
-            f"SELECT project, task_id, COUNT(*) AS n FROM runs "
+            f"SELECT project, task_id, COUNT(*) AS n FROM runs "  # noqa: S608
             f"WHERE status = 'failed' AND (project, task_id) IN ({marks}) "
             f"GROUP BY project, task_id",
             flat,
@@ -323,7 +323,7 @@ _UPSERT_TASK_SQL = f"""
             END,
             args_override      = CASE WHEN excluded.args != tasks.args THEN NULL ELSE tasks.args_override END
         WHERE tasks.status NOT IN ('running')
-        """
+        """  # noqa: S608
 
 
 def _upsert_task_params(task: QueueTask) -> tuple:
@@ -491,7 +491,7 @@ def get_queued_window(
     n = max(1, int(limit))
     marks = ",".join("?" for _ in statuses)
     slim = conn.execute(
-        "SELECT rowid AS rid, project, task_id, depends_on, depends_on_any FROM tasks "
+        "SELECT rowid AS rid, project, task_id, depends_on, depends_on_any FROM tasks "  # noqa: S608
         f"WHERE status IN ({marks}) AND enabled = 1 ORDER BY priority DESC, enqueued_at ASC LIMIT ?",
         (*statuses, n + max(0, int(extra_scan))),
     ).fetchall()
@@ -663,7 +663,7 @@ def transition_task(
         sets.append(f"{name} = ?")
         values.append(value)
     cur = conn.execute(
-        f"UPDATE tasks SET {', '.join(sets)} WHERE project = ? AND task_id = ? "
+        f"UPDATE tasks SET {', '.join(sets)} WHERE project = ? AND task_id = ? "  # noqa: S608
         f"AND status IN ({', '.join('?' * len(states))})",
         (*values, project, task_id, *states),
     )
@@ -818,10 +818,12 @@ def set_task_priority(conn: sqlite3.Connection, project: str, task_id: str, prio
     conn.commit()
 
 
-def request_stop(conn: sqlite3.Connection, project: str, task_id: str) -> None:
+def request_stop(conn: sqlite3.Connection, project: str, task_id: str, *, hard: bool = False) -> None:
+    """stop_requested: 1 = cooperative stop, 2 = hard stop (kill now). A later soft request never downgrades."""
     conn.execute(
-        "UPDATE tasks SET stop_requested = 1, updated_at = ? WHERE project = ? AND task_id = ?",
-        (_now(), project, task_id),
+        "UPDATE tasks SET stop_requested = CASE WHEN stop_requested >= 2 THEN stop_requested ELSE ? END, "
+        "updated_at = ? WHERE project = ? AND task_id = ?",
+        (2 if hard else 1, _now(), project, task_id),
     )
     conn.commit()
 
@@ -833,8 +835,10 @@ def request_stop_with_control(
     task_id: str,
     action: str = "suspend",
     requested_by: str | None = None,
+    *,
+    hard: bool = False,
 ) -> Path | None:
-    """Cooperative stop: control file + stop_requested (CLI and HTTP).
+    """Cooperative stop: control file + stop_requested (CLI and HTTP). ``hard``: kill without grace.
 
     F-198: only write a control file while the task is running. A stale
     ``suspend`` file left after stop-of-non-running would make the next
@@ -847,7 +851,7 @@ def request_stop_with_control(
         path = write_control_action(home, project, task_id, action, requested_by=requested_by)
     else:
         clear_control_file(home, project, task_id)
-    request_stop(conn, project, task_id)
+    request_stop(conn, project, task_id, hard=hard)
     return path
 
 
@@ -904,7 +908,7 @@ def _requeue_row(conn: sqlite3.Connection, project: str, task_id: str, *, requir
         if code in _STICKY_PREFLIGHT_CODES:
             sticky_code, sticky_reason = code, reason
     cur = conn.execute(
-        "UPDATE tasks SET status = 'queued', enabled = 1, stop_requested = 0, "
+        "UPDATE tasks SET status = 'queued', enabled = 1, stop_requested = 0, "  # noqa: S608
         "cap_auto_retry_count = 0, last_error_code = ?, block_reason = ?, "
         "retry_attempt_baseline = ?, "
         "updated_at = ?, finished_at = NULL "
@@ -1363,10 +1367,7 @@ def lock_occupancy(conn: sqlite3.Connection) -> dict[str, dict]:
         "WHERE t.status = 'running'"
     ).fetchall()
     for row in running:
-        try:
-            res = json.loads(row["resources"] or "{}")
-        except (TypeError, ValueError):
-            res = {}
+        res = row_resources(row)
         locks = res.get("locks") or []
         if not isinstance(locks, list):
             continue
@@ -1382,10 +1383,7 @@ def lock_occupancy(conn: sqlite3.Connection) -> dict[str, dict]:
         "WHERE status = 'queued' AND last_error_code = 'tq.block.mutex'"
     ).fetchall()
     for row in waiting:
-        try:
-            res = json.loads(row["resources"] or "{}")
-        except (TypeError, ValueError):
-            res = {}
+        res = row_resources(row)
         locks = res.get("locks") or []
         if not isinstance(locks, list):
             continue

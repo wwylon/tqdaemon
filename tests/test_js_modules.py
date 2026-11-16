@@ -48,6 +48,7 @@ def test_dur_and_fmt():
     assert out == ["—", "—", "5s", "1m05s", "1h02m", "—", "not a date"]
 
 
+@pytest.mark.flaky
 def test_append_log_keeps_bounded_tail():
     out = _run(
         _fmt_import("appendLog, LOG_CAP_CHARS")

@@ -10,4 +10,4 @@ Bootstrap constraints: [AGENTS.md](../../AGENTS.md)
 
 Shared references: [task standards](../task_standards.md) · [clients](../../clients/README.md) · [examples](../../examples/) · [errors](../errors.md)
 
-Behavior rules (when to enqueue): [devkit `rules/queue.md`](https://github.com/wwylon/devkit/blob/main/rules/queue.md) (optional companion repo)
+Behavior rules (when to enqueue, how to wait): [queue-rules.md](queue-rules.md)

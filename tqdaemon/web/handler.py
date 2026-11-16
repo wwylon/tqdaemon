@@ -38,6 +38,7 @@ from .deps import (
     unquote,
     urlparse,
 )
+from .routes_leases import LeaseRoutes
 from .routes_read import ReadRoutes
 from .routes_transfer import TransferRoutes
 from .routes_worker import WorkerRoutes
@@ -75,6 +76,31 @@ def _host_is_local_name(host_header: str) -> bool:
         return False
 
 
+def local_bypass_allowed(cfg: dict, client_ip: str, headers: Any) -> bool:
+    """S3: loopback clients skip the token unless ``require_token_local`` is on.
+
+    With the opt-in set, every local process (other users, extensions, task scripts) must present
+    the token like a remote client; the UI keeps it in localStorage (Preferences).
+    """
+    if int(cfg.get("require_token_local", 0) or 0):
+        return False
+    return client_ip in ("127.0.0.1", "::1", "localhost") and _loopback_bypass_ok(headers)
+
+
+_query_token_warned = False
+
+
+def _warn_query_token_once() -> None:
+    """S4: a token in an API query string lands in logs, history and Referer headers."""
+    global _query_token_warned
+    if not _query_token_warned:
+        _query_token_warned = True
+        _log.warning(
+            "API token received in the query string (deprecated; use Authorization: Bearer or "
+            "X-TQ-Token — the UI already does, and SSE uses one-time tickets)"
+        )
+
+
 def _loopback_bypass_ok(headers: Any) -> bool:
     """Loopback clients skip token auth only for direct requests.
 
@@ -101,6 +127,7 @@ class Handler(
     WriteRoutes,
     WorkerRoutes,
     TransferRoutes,
+    LeaseRoutes,
     SSEMixin,
     BaseHTTPRequestHandler,
 ):
@@ -216,7 +243,7 @@ class Handler(
     def _project_from_qs(self) -> str | None:
         qs = self._query()
         p = qs.get("project", [None])[0]
-        return p
+        return self._canonical_project(p) if p else p
 
     def _check_auth(self) -> bool:
         """Return False if response already sent (401/403)."""
@@ -257,11 +284,13 @@ class Handler(
 
         # Same-machine localhost bypass: skip token check for loopback clients.
         client_ip = getattr(self, "client_address", (None,))[0] or ""
-        if client_ip in ("127.0.0.1", "::1", "localhost") and _loopback_bypass_ok(self.headers):
+        if local_bypass_allowed(cfg, client_ip, self.headers):
             return True
 
         qs = self._query()
         qtok = (qs.get("tq_token") or qs.get("token") or [None])[0]
+        if qtok:
+            _warn_query_token_once()
         provided = extract_request_token(dict(self.headers), qtok)
         ticket = (qs.get("tq_ticket") or [None])[0]
         if ticket and not provided and self.command == "GET" and is_stream_path(path):
@@ -356,11 +385,16 @@ class Handler(
         self.path = f"/api/tasks/{proj}/{task_id}/retry"
         self._task_retry(proj, task_id)
 
-    def _post_force(self, mid: str) -> None:
+    def _post_force(self, mid: str, *, start_now: bool = False) -> None:
         proj, task_id = self._split2(mid)
-        err = force_task(self._wconn(), proj, task_id)
+        if start_now:
+            from tqdaemon.db import start_now_task
+
+            err = start_now_task(self._wconn(), proj, task_id)
+        else:
+            err = force_task(self._wconn(), proj, task_id)
         if err is None:
-            self._audit("force", proj, task_id)
+            self._audit("start_now" if start_now else "force", proj, task_id)
         self._json({"ok": err is None, "error": err})
 
     def _post_enable(self, mid: str, qs: dict) -> None:
@@ -418,16 +452,19 @@ class Handler(
             return
         fn(mid)
 
-    def _post_project_stop_all(self, proj_name: str) -> None:
+    def _post_project_stop_all(self, proj_name: str, qs: dict | None = None) -> None:
         if not proj_name:
             self.send_error(400)
             return
+        hard = (((qs or {}).get("hard") or ["0"])[0] or "0").strip().lower() in ("1", "true", "yes")
         stopped = 0
         for row in get_running_tasks(self._rconn()):
             if row["project"] == proj_name:
-                request_stop_with_control(self._wconn(), Path(self._db_path).parent, proj_name, row["task_id"])
+                request_stop_with_control(
+                    self._wconn(), Path(self._db_path).parent, proj_name, row["task_id"], hard=hard
+                )
                 stopped += 1
-        self._audit("stop_all", proj_name, proj_name, str(stopped))
+        self._audit("stop_all_hard" if hard else "stop_all", proj_name, proj_name, str(stopped))
         self._json({"ok": True, "stopped": stopped})
 
     def _post_project_set_route(self, mid: str) -> None:
@@ -492,7 +529,17 @@ class Handler(
         project, sep, task_id = s.partition("/")
         if not sep or not project or not task_id:
             raise BadRequest(f"expected project/task_id, got {s!r}")
-        return unquote(project), unquote(task_id)
+        canon = getattr(self, "_canonical_project", None)  # absent on bare test doubles
+        name = unquote(project)
+        return (canon(name) if canon else name), unquote(task_id)
+
+    def _canonical_project(self, name: str) -> str:
+        """Current id for ``name`` (an old id after ``tq project rename`` resolves via project_aliases)."""
+        if name in self._projects_ref():
+            return name
+        from tqdaemon.project_rename import resolve_project
+
+        return resolve_project(self._rconn(), name)
 
     def _read_json(self, max_bytes: int = 1024 * 1024) -> dict[str, Any] | None:
         """Parse a JSON object body. Returns None if an error response was already sent.
@@ -692,11 +739,14 @@ _GET_EXACT: dict[str, Callable[[Any], None]] = {
     "/api/my-projects": lambda h: h._get_my_projects_route(),
     "/api/project-limits": lambda h: h._json(h._get_project_limits_enriched()),
     "/api/set-limits": lambda h: h._json(h._get_set_limits()),
+    "/api/limits/tree": lambda h: h._json(h._get_limit_tree()),
+    "/api/config/schema": lambda h: h._json(h._get_config_schema()),
     "/api/locks": lambda h: h._json(h._get_locks()),
     "/api/project-roots": lambda h: h._get_project_roots_route(),
     "/api/workers": lambda h: h._json(h._get_workers()),
     "/api/attention": lambda h: h._json(h._get_attention()),
     "/api/capacity": lambda h: h._json(build_capacity(h._rconn(), get_config(h._rconn()))),
+    "/api/leases": lambda h: h._get_leases(),
     "/api/plan": lambda h: h._json(h._get_plan()),
     "/api/report": lambda h: h._json(h._get_report()),
     "/api/hygiene": lambda h: h._json(h._get_hygiene()),
@@ -803,6 +853,8 @@ _GET_PREFIX: tuple[_GetRoute, ...] = (
     ("/docs/", "", None, lambda h, rest, path: h._serve_docs(path)),
     ("/static/locales/", "", None, lambda h, rest, path: h._serve_locale(path)),
     ("/static/js/", "", None, lambda h, rest, path: h._serve_js_module(path)),
+    ("/api/jobs/", "", None, lambda h, rest, path: h._job_status(rest)),
+    ("/api/leases/", "", None, lambda h, rest, path: h._get_lease(rest)),
     ("/api/bundle/", "", None, lambda h, rest, path: _exactly_two(h, rest, h._serve_bundle)),
     ("/api/package/", "", None, lambda h, rest, path: _exactly_two(h, rest, h._serve_package_overlay)),
     (
@@ -872,6 +924,7 @@ _POST_EXACT: dict[str, Callable[[Any], None]] = {
     "/api/project-sets/rename": lambda h: h._post_project_sets_rename(),
     "/api/project-sets/node": lambda h: h._post_set_node(),
     "/api/set-limits": lambda h: h._post_set_limits(),
+    "/api/limits/node": lambda h: h._post_limit_node(),
     "/api/projects/bulk": lambda h: h._post_projects_bulk(),
     "/api/worker/register": lambda h: h._worker_register(),
     "/api/worker/heartbeat": lambda h: h._worker_heartbeat(),
@@ -884,12 +937,14 @@ _POST_EXACT: dict[str, Callable[[Any], None]] = {
     "/api/tokens": lambda h: h._post_token(),
     "/api/sse-ticket": lambda h: h._post_sse_ticket(),
     "/api/yield-master": lambda h: h._post_yield_master(),
+    "/api/leases": lambda h: h._post_lease(),
 }
 
 
 # Ordered prefix/suffix POST routes: (prefix, suffix, handler(h, middle, path, qs)).
 # First match wins, so specific routes come first (e.g. /api/project/freeze/ before /api/project/<p>/set).
 _POST_PREFIX: list[tuple[str, str, Callable[..., None]]] = [
+    ("/api/leases/", "/release", lambda h, m, p, q: h._post_lease_release(m)),
     ("/api/groups/", "/stop", lambda h, m, p, q: h._bulk(lambda: h._group_stop(unquote(m), q))),
     ("/api/groups/", "/retry", lambda h, m, p, q: h._bulk(lambda: h._group_retry(unquote(m), q))),
     ("/api/suites/", "/retry", lambda h, m, p, q: h._bulk(lambda: h._suite_retry(unquote(m), q))),
@@ -899,6 +954,7 @@ _POST_PREFIX: list[tuple[str, str, Callable[..., None]]] = [
     ("/api/unhold/", "", lambda h, m, p, q: h._post_unhold(p, q)),
     ("/api/retry/", "", lambda h, m, p, q: h._post_legacy_retry(m)),
     ("/api/force/", "", lambda h, m, p, q: h._post_force(m)),
+    ("/api/start-now/", "", lambda h, m, p, q: h._post_force(m, start_now=True)),
     ("/api/mark-processed/", "", lambda h, m, p, q: h._post_mark_processed(p)),
     ("/api/enable/", "", lambda h, m, p, q: h._post_enable(m, q)),
     ("/api/priority/", "", lambda h, m, p, q: h._post_priority(p, q)),
@@ -928,9 +984,10 @@ _POST_PREFIX: list[tuple[str, str, Callable[..., None]]] = [
     ("/api/project/resume/", "", lambda h, m, p, q: h._post_project_flag(m, "paused", False)),
     ("/api/project/release/", "", lambda h, m, p, q: h._post_project_named(m, h._post_release_project)),
     ("/api/project/relocate/", "", lambda h, m, p, q: h._post_project_named(m, h._post_relocate_project)),
+    ("/api/project/rename/", "", lambda h, m, p, q: h._post_project_named(m, h._post_rename_project)),
     ("/api/remove/", "", lambda h, m, p, q: h._post_remove_task(p, q)),
     ("/api/project/remove/", "", lambda h, m, p, q: h._post_remove_project(m, q)),
-    ("/api/project/stop-all/", "", lambda h, m, p, q: h._post_project_stop_all(m)),
+    ("/api/project/stop-all/", "", lambda h, m, p, q: h._post_project_stop_all(m, q)),
     ("/api/project/", "/set", lambda h, m, p, q: h._post_project_set_route(m)),
 ]
 
@@ -974,6 +1031,7 @@ def make_handler(
     *,
     release_project: Callable[[str], dict[str, Any]] | None = None,
     relocate_project: Callable[[str, str], dict[str, Any]] | None = None,
+    rename_project: Callable[[str, str, bool, bool], dict[str, Any]] | None = None,
 ):
     import threading as _threading
 
@@ -994,6 +1052,7 @@ def make_handler(
         tls=_threading.local(),
         release_project=release_project,
         relocate_project=relocate_project,
+        rename_project=rename_project,
     )
 
     class BoundHandler(Handler):
@@ -1013,5 +1072,6 @@ def make_handler(
         _commands_condition = ctx.commands_condition
         _release_project = staticmethod(release_project) if release_project else None
         _relocate_project = staticmethod(relocate_project) if relocate_project else None
+        _rename_project = staticmethod(rename_project) if rename_project else None
 
     return BoundHandler

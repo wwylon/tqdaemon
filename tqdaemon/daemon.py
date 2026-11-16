@@ -62,7 +62,7 @@ from tqdaemon.models import (
     task_key,
 )
 from tqdaemon.resources import detect_system, gpu_refresh_interval
-from tqdaemon.rows import has_col
+from tqdaemon.rows import has_col, row_resources
 from tqdaemon.runner import ActiveRun, build_process_children_map
 from tqdaemon.scheduler import _note_block
 from tqdaemon.web import start_web_server
@@ -476,6 +476,9 @@ def decide_terminal_status(
     elif stop_reason in ("frozen", "frozen_restart"):
         status = STATUS_INTERRUPTED
         err_code = tqerr.RUN_FROZEN
+    elif stop_reason == "killed":
+        status = STATUS_INTERRUPTED
+        err_code = tqerr.STOP_KILLED
     elif stop_requested:
         status = STATUS_INTERRUPTED
     elif negative_exit:
@@ -625,7 +628,15 @@ def _run_local_admission(
     """Run local admission if gates allow. Returns updated cooldown_logged."""
     _cooldown = now < admit_frozen_until
     _cooldown_reason = ""
-    if _cooldown:
+    _drain = bool(int(cfg.get("admission_drain", 0) or 0))
+    if _drain:
+        # `tq drain on`: finish what runs, start nothing new (UI-forced starts still go through).
+        _cooldown = True
+        _cooldown_reason = "admission drained: no new tasks start (tq drain off to resume)"
+        if not cooldown_logged:
+            print(f"[queue] {_ts()} {_cooldown_reason}", flush=True)
+            cooldown_logged = True
+    elif _cooldown:
         _cooldown_reason = f"admission frozen for {admit_frozen_until - now:.0f}s after resource-pressure stop"
         if not cooldown_logged:
             print(f"[queue] {_ts()} {_cooldown_reason}", flush=True)
@@ -645,8 +656,10 @@ def _run_local_admission(
     elif _cpu_gate_log["blocked"]:
         print(f"[queue] {_ts()} admission resumed (CPU): live load {cpu_ema:.1f} cores", flush=True)
     _cpu_gate_log["blocked"] = _cpu_blocked
+    from tqdaemon.leases import process_leases
     from tqdaemon.scheduler import _local_admit_queued
 
+    process_leases(conn, system_info, cfg, active_runs)  # T-208: leases first, they are interactive
     _local_admit_queued(
         conn,
         home,
@@ -908,6 +921,16 @@ def _enforce_stops_and_caps(conn, active_runs: dict, home: Path, suspend_grace: 
     for key, run in list(active_runs.items()):
         task_row = get_task(conn, *key)
         # The cap branch below owns a cap stop (it sets stop_requested itself).
+        if task_row and int(task_row["stop_requested"] or 0) >= 2:
+            # Operator hard stop: no cooperative grace, no sleep-tier exemption.
+            if not getattr(run, "_kill_sent", False):
+                run._kill_sent = True
+                by = _control_requester(home, *key) or "operator"
+                print(f"[queue] {_ts()} hard stop {task_key(*key)} by {by}: killing process tree", flush=True)
+                run.kill_now()
+            else:
+                run.stop(background=True)  # recovers a reader stuck after the kill
+            continue
         if task_row and task_row["stop_requested"] and not getattr(run, "_cap_stop_requested", False):
             # F-126: Tier-2 ``tq sleep`` freeze must not escalate to SIGTERM while frozen.
             try:
@@ -975,10 +998,7 @@ def _heartbeat_and_sanity(
     for key, run in active_runs.items():
         run.update_db_progress(conn)
         cur_active = run.refresh_active_cpu()
-        try:
-            task_res = json.loads(run.task_row["resources"] or "{}")
-        except (TypeError, ValueError, KeyError):
-            task_res = {}
+        task_res = row_resources(run.task_row)
         gpu_requested_gib = float(task_res.get("gpu_vram_gib", 0.0))
         gpu_requested = gpu_requested_gib > 0
         wsl_dispatched = str(run.task_row["command"]).lower() == "wsl"
@@ -1978,6 +1998,49 @@ def run_daemon(home: Path, *, claim_master: bool = False) -> None:
         finally:
             cb_conn.close()
 
+    def _rename_project_cb(old: str, new: str, dry_run: bool = False, keep_alias: bool = True) -> dict:
+        """Rename a project id: DB + projects.yaml + files in the core, then reload registry, watches, caches, sync."""
+        from tqdaemon.project_rename import RenameError, checklist, plan_rename, rename_project
+
+        cb_conn = open_db(tqconfig.db_path(home))  # HTTP thread: never the tick's connection
+        try:
+            if dry_run:
+                try:
+                    return {**plan_rename(home, cb_conn, old, new), "dry_run": True}
+                except RenameError as exc:
+                    return {"ok": False, "error": str(exc)}
+            if _queue_watches is not None:
+                _queue_watches.release(old, projects)
+            try:
+                summary = rename_project(home, cb_conn, old, new, alias=keep_alias)
+            except RenameError as exc:
+                if _queue_watches is not None:
+                    _queue_watches.clear_release(old)
+                    _queue_watches.update(projects)
+                return {"ok": False, "error": str(exc)}
+            _replace_registry(projects, load_projects(home))
+            if _queue_watches is not None:
+                _queue_watches.clear_release(old)
+                _queue_watches.update(projects)
+            _after_rename_reset_caches()
+            proj = projects.get(new)
+            summary["sync"] = _sync_project(cb_conn, proj, home=home, force=True) if proj is not None else {}
+            summary["checklist"] = checklist(old, new)
+            return summary
+        finally:
+            cb_conn.close()
+
+    def _after_rename_reset_caches() -> None:
+        """Drop in-memory views keyed by the old name (project list cache, estimate cache)."""
+        try:
+            from tqdaemon.web import responses as _resp
+
+            with _resp._projects_lock:
+                _resp._projects_cache_by_db.clear()
+                _resp._projects_cache_ts = 0.0
+        except Exception:  # noqa: BLE001 - cache reset is best-effort; entries expire by TTL anyway
+            _log.debug("project cache reset failed", exc_info=True)
+
     def _relocate_with_conn(conn, name: str, new_root_s: str) -> dict:
         from tqdaemon.project_relocate import (
             count_running,
@@ -2031,6 +2094,7 @@ def run_daemon(home: Path, *, claim_master: bool = False) -> None:
         bind_host=bind_host,
         release_project=_release_project_cb,
         relocate_project=_relocate_project_cb,
+        rename_project=_rename_project_cb,
     )
     auth_on = "on" if (cfg.get("auth_token") or "") else "off"
     print(
@@ -2088,6 +2152,10 @@ def run_daemon(home: Path, *, claim_master: bool = False) -> None:
     def _handle_sigterm(sig, frame):
         nonlocal shutdown
         shutdown = True
+        from tqdaemon.adopt import peek_keep_runs
+        from tqdaemon.daemon_state import begin_shutdown
+
+        begin_shutdown(keep_runs=peek_keep_runs(home))  # the web UI shows the shutdown stage
         print(f"[queue] {_ts()} shutdown requested (signal {sig}); active_runs={len(active_runs)}", flush=True)
 
     signal.signal(signal.SIGTERM, _handle_sigterm)
@@ -2113,7 +2181,13 @@ def run_daemon(home: Path, *, claim_master: bool = False) -> None:
     )
     st = TickState(projects)
 
+    from tqdaemon.tick_watchdog import TickWatchdog
+
+    _tick_wd = TickWatchdog()
+    _tick_wd.start()
+
     while not shutdown:
+        _tick_wd.beat()
         try:
             if not daemon_tick(env, st):
                 time.sleep(st.interval)
@@ -2131,6 +2205,8 @@ def run_daemon(home: Path, *, claim_master: bool = False) -> None:
             # Discard partial writes from the failed tick and still reap finished runs.
             _recover_after_tick_failure(conn, active_runs, home, st.frozen_alerted)
             time.sleep(st.interval)
+
+    _tick_wd.stop()
 
     from tqdaemon.power import set_prevent_sleep
 

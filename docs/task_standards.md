@@ -58,6 +58,7 @@ Fields recognized by `parse_task_yaml` (see `tqdaemon/db.py`). Required fields a
 | `resources.cpu_cores` | `1` | Logical cores. |
 | `resources.ram_gib` | `0.0` | Requested RAM GiB. |
 | `resources.gpu_vram_gib` | `0.0` | Requested VRAM GiB admission guard. **Not a device flush guarantee** — see §3 GPU note. Tasks with `gpu_vram_gib > 0` get a GPU badge in the UI / `requires_gpu` in `tq list --json`. |
+| *(other keys)* | — | GPU-looking keys (`gpu`, `vram`, `gpu_gib`, …) are **rejected** by validation/sync (a silently ignored `gpu: 1` once let two GPU jobs share the card): use `gpu_vram_gib`. Other unknown keys (`cpu`, `ram_gb`, …) are ignored with a warning. |
 | `resources.locks` | `[]` | Named mutexes. Two running tasks may not share a lock (`tq.block.mutex`). Also used to attribute sidecar VRAM (e.g. `locks: [ollama]` matches `ollama.exe` and Windows `llama-server.exe`). Ignore generic names (`python`, `node`, `java`). |
 | `exclusive` | `false` | When true, no other task may run while this one runs (and it waits if anything is already running). Prefer full `gpu_vram_gib` over blanket `exclusive` when CPU tasks should continue — see §3 GPU note. |
 | `exclusive_project` | `false` | When true, no other task from the **same project** may run while this one runs (and it waits if any same-project task is already running). Tasks from other projects are unaffected. Weaker than `exclusive`; stronger than relying only on per-project resource limits. |

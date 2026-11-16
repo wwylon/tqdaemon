@@ -35,3 +35,5 @@ class HandlerContext:
     # F-240: daemon-owned project folder release / relocate (watch + registry).
     release_project: Callable[[str], dict[str, Any]] | None = None
     relocate_project: Callable[[str, str], dict[str, Any]] | None = None
+    # (old, new, dry_run, keep_alias) -> summary; daemon-owned like relocate.
+    rename_project: Callable[[str, str, bool, bool], dict[str, Any]] | None = None

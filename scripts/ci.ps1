@@ -92,7 +92,7 @@ print('ok', spec.task_id)
     if ($LASTEXITCODE -ne 0) { throw "check_docs failed" }
 
     if (-not $NoTest) {
-        $marker = if ($Mode -eq "fast" -or $Mode -eq "full") { "not stress and not slow and not nightly" } else { "stress or slow or nightly" }
+        $marker = if ($Mode -eq "fast" -or $Mode -eq "full") { "not stress and not slow and not nightly and not flaky" } else { "stress or slow or nightly or flaky" }
         if ($Mode -eq "nightly") { $marker = "stress or slow or nightly" }
         Write-Host "==> pytest (-m `"$marker`")" -ForegroundColor Cyan
         $pytestArgs = @("pytest", "tests/", "-q", "-m", $marker, "--durations=20")
@@ -116,6 +116,10 @@ print('ok', spec.task_id)
         Write-Host "==> dependency consistency" -ForegroundColor Cyan
         uv pip check
         if ($LASTEXITCODE -ne 0) { throw "uv pip check failed" }
+        # Advisory (needs network): known-vulnerable Python and JS dependencies.
+        Write-Host "==> pip-audit / npm audit (advisory)" -ForegroundColor Cyan
+        uvx pip-audit --skip-editable 2>&1 | Write-Host
+        if ($node) { npm audit --omit=dev 2>&1 | Write-Host }
         Write-Host "==> tq doctor" -ForegroundColor Cyan
         $doctorHome = Join-Path $env:TEMP "tqdaemon-ci-doctor"
         New-Item -ItemType Directory -Force -Path $doctorHome | Out-Null

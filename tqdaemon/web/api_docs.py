@@ -100,7 +100,9 @@ def _register_api_docs() -> None:
         "/api/project-limits",
         "Per-project limit overrides + effective (inherited set defaults) + set defaults map",
     )
-    _e("GET", "/api/set-limits", "Set-level limit defaults (inherited by member projects)")
+    _e("GET", "/api/set-limits", "Set-level caps (subtree totals; min_tasks is a per-member default)")
+    _e("GET", "/api/limits/tree", "Limits tree all > sets > projects: own / effective caps and live usage per node")
+    _e("GET", "/api/config/schema", "Every config key with section, help, type, bounds and default (Settings dialog)")
     _e("GET", "/api/locks", "Named resource lock occupancy + contention vs project max_tasks")
     _e("GET", "/api/workers", "Registered remote workers")
     _e("GET", "/api/attention", "Tasks needing attention (blocked, failed, etc.)")
@@ -209,6 +211,7 @@ def _register_api_docs() -> None:
             "reason": "Optional stop reason stored on the latest run",
             "operator": "Caller identity",
             "force": "1 to override ownership",
+            "hard": "1 = hard stop: kill the process tree now, no checkpoint grace",
         },
     )
     _e(
@@ -318,13 +321,19 @@ def _register_api_docs() -> None:
         body='{"action":"add","path":"bots/bridge2"}',
     )
     _e("POST", "/api/force/<project>/<task_id>", "Force-run a task immediately")
+    _e("POST", "/api/start-now/<project>/<task_id>", "Start first in line, ignoring RAM/VRAM held for other tasks")
+    _e("POST", "/api/limits/node", "Set caps on one limits-tree node: {kind: root|set|project, path, fields}")
     _e(
         "GET",
         "/api/worker/next-task",
         "Worker: claim next eligible task",
         params={"worker_id": "Worker ID", "protocol": "Protocol version"},
     )
-    _e("GET", "/api/worker/version", "W7.5: Master version info + upgrade_url/sha256 for auto-upgrade")
+    _e(
+        "GET",
+        "/api/worker/version",
+        "W7.5: Master version info + upgrade_url/sha256 (+ sig = HMAC keyed by auth_token) for auto-upgrade",
+    )
     _e("GET", "/api/worker/wheel", "W7.5: Download pre-built worker wheel (requires auth)")
     _e("POST", "/api/worker/register", "Worker: register or update worker metadata", body="WorkerInfo JSON")
     _e(
@@ -374,7 +383,7 @@ def _register_api_docs() -> None:
     _e(
         "GET",
         "/api/timeline",
-        "Forward forecast Gantt (queued/running + cron)",
+        "Forward forecast Gantt (queued/running + cron); not_shown lists queued tasks with no bar and why",
         params={"project": "Filter by project", "hours": "Forward window hours"},
     )
     _e(
@@ -426,6 +435,11 @@ def _register_api_docs() -> None:
         "POST",
         "/api/project/release/<project>",
         "Drop the queue-dir file watch so the project folder can be renamed (F-240; audited)",
+    )
+    _e(
+        "POST",
+        "/api/project/rename/<project>",
+        "Rename a project id with its history (body new, dry_run=false, alias=true): DB rows, config keys, projects.yaml, log folder, cross-project depends_on; admin only; refused while a task of the project runs",
     )
     _e(
         "POST",
@@ -495,8 +509,17 @@ def _register_api_docs() -> None:
     _e(
         "POST",
         "/api/cli/archive",
-        "Archive old finished tasks: export to <home>/archive/<project>.jsonl, move YAML to queue_dir/archive/, drop DB rows (body: projects, older_than_days=30, statuses=[completed], max_completed_runs, dry_run)",
+        "Archive old finished tasks: export to <home>/archive/<project>.jsonl, move YAML to queue_dir/archive/, drop DB rows (body: projects, older_than_days=30, statuses=[completed], max_completed_runs, dry_run, async=true → 202 {job}, poll GET /api/jobs/<id>)",
     )
+    _e(
+        "POST",
+        "/api/leases",
+        "T-208: request an ad-hoc GPU lease (body vram_gib, ttl_sec=900, priority=0, holder, pid) -> 202 {id}; counts against VRAM like a task",
+    )
+    _e("GET", "/api/leases", "Waiting and active GPU leases")
+    _e("GET", "/api/leases/<id>", "One GPU lease: status waiting | active | released | expired")
+    _e("POST", "/api/leases/<id>/release", "Release a GPU lease (also ends on TTL expiry or holder pid death)")
+    _e("GET", "/api/jobs/<id>", "State of a background job (archive with async=true): running | done | error + result")
     _e(
         "POST",
         "/api/cli/sync",

@@ -5,16 +5,19 @@ Extracted from daemon.py. daemon re-exports these names for existing callers.
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import sqlite3
 import sys
 import threading
+import time
 from pathlib import Path
 
 from tqdaemon._db_tasks import _upsert_task_no_commit, stamp_provenance
 from tqdaemon._time import _now
 from tqdaemon.config import Project
 from tqdaemon.db import parse_task_yaml_many
+from tqdaemon.project_rename import alias_map, canonical_dep_refs
 
 # W4.3: mtime cache — skip re-parsing YAML files that haven't changed.
 # Key: absolute path string; value: (mtime_ns, YAML_PARSER_GEN, task_ids, file_bytes).
@@ -61,11 +64,41 @@ def yaml_cache_stats() -> dict[str, int]:
     }
 
 
-def _in_queue_dir(key: str, qdir_str: str, qdir_resolved: Path) -> bool:
-    """True if cache key lives directly under the queue dir (string compare first, resolve as fallback)."""
-    if os.path.dirname(key) == qdir_str:
+def _in_queue_dir(key: str, qdir_str: str, qdir_resolved: Path, memo: dict[str, bool] | None = None) -> bool:
+    """True if cache key lives directly under the queue dir (string compare first, resolve as fallback).
+
+    ``memo`` caches the answer per parent directory: the cache holds every project's YAMLs, so
+    without it each project's cleanup resolved thousands of foreign paths (minutes per tick on Windows).
+    """
+    parent = os.path.dirname(key)
+    if parent == qdir_str:
         return True
-    return Path(key).resolve().parent == qdir_resolved
+    if memo is not None and parent in memo:
+        return memo[parent]
+    hit = Path(_resolved(parent)) == qdir_resolved
+    if memo is not None:
+        memo[parent] = hit
+    return hit
+
+
+# resolve() is a filesystem round trip (slow through junctions and on a loaded host). The per-call memo above
+# only helps within one project's cleanup; this one is shared across projects and ticks, so each distinct
+# directory is resolved once per _RESOLVE_TTL_SEC instead of once per project per sync pass (a 133 s tick stall,
+# caught by the tick watchdog on 2026-11-16, was this loop).
+_RESOLVE_TTL_SEC = 300.0
+_RESOLVE_CACHE: dict[str, tuple[float, str]] = {}
+
+
+def _resolved(path_str: str) -> str:
+    now = time.monotonic()
+    hit = _RESOLVE_CACHE.get(path_str)
+    if hit is not None and now - hit[0] < _RESOLVE_TTL_SEC:
+        return hit[1]
+    value = str(Path(path_str).resolve())
+    if len(_RESOLVE_CACHE) > 4096:
+        _RESOLVE_CACHE.clear()
+    _RESOLVE_CACHE[path_str] = (now, value)
+    return value
 
 
 # The tick and HTTP threads (/api/sync, relocate) both sync projects: serialize them so the
@@ -111,6 +144,7 @@ def _sync_project_unlocked(
     # W4.11: max queued tasks per project (default 500); warn but do not delete.
     _max_queued = int(cfg.get("max_queued_tasks_per_project", 500))
     found_task_ids: set[str] = set()
+    _aliases = alias_map(conn)  # {old project id: new} from `tq project rename`
     dirty = False  # W4.3: only commit if at least one upsert was needed
     upserted = 0
     deleted = 0
@@ -191,6 +225,13 @@ def _sync_project_unlocked(
             task_list = parse_task_yaml_many(yaml_path, project, allow_remote_notify=allow_remote)
             _file_skipped = False
             for task in task_list:
+                if _aliases and (task.depends_on or task.depends_on_any):
+                    # After `tq project rename`, YAMLs written with the old id keep working.
+                    task = dataclasses.replace(
+                        task,
+                        depends_on=canonical_dep_refs(task.depends_on, _aliases),
+                        depends_on_any=canonical_dep_refs(task.depends_on_any, _aliases),
+                    )
                 # F-060: mark present before cap logic so cleanup never deletes
                 # YAML-backed tasks merely because the admission cap is full.
                 found_task_ids.add(task.task_id)
@@ -332,7 +373,7 @@ def _sync_project_unlocked(
         )
         # Still evict mtime cache entries for paths that are gone (F-070 partial).
         live_keys = {str(p) for p in yaml_paths}
-        qdir_resolved = project.queue_dir.resolve()
+        qdir_resolved = Path(_resolved(str(project.queue_dir)))
         qdir_str = str(project.queue_dir)
         for k in list(cache):
             try:
@@ -376,9 +417,10 @@ def _sync_project_unlocked(
         qdir_resolved = project.queue_dir.resolve()
         qdir_str = str(project.queue_dir)
         stale = []
+        dir_memo: dict[str, bool] = {}
         for k in list(cache):
             try:
-                if k not in live_keys and _in_queue_dir(k, qdir_str, qdir_resolved):
+                if k not in live_keys and _in_queue_dir(k, qdir_str, qdir_resolved, dir_memo):
                     stale.append(k)
             except (OSError, TypeError, ValueError):
                 continue

@@ -200,8 +200,8 @@ class WorkerSlot:
                 if not dest.is_file():
                     dest.parent.mkdir(parents=True, exist_ok=True)
                     overlay_url = f"{master_url}/api/package/{pkg.project or proj_name}/{pkg.patch_hash}"
-                    req = urllib.request.Request(overlay_url, headers=_auth_headers())
-                    with urllib.request.urlopen(req, timeout=120) as oresp:
+                    req = urllib.request.Request(overlay_url, headers=_auth_headers())  # noqa: S310
+                    with urllib.request.urlopen(req, timeout=120) as oresp:  # noqa: S310
                         dest.write_bytes(oresp.read())
                 overlay = dest
             cache = materialize_git_package(
@@ -235,8 +235,8 @@ class WorkerSlot:
                     extract_dir = tmp_path / "out"
                     extract_dir.mkdir()
                     bundle_url = f"{master_url}/api/bundle/{proj_name}/{bh}"
-                    req = urllib.request.Request(bundle_url, headers=_auth_headers())
-                    with urllib.request.urlopen(req, timeout=120) as bresp, open(tar_path, "wb") as out:
+                    req = urllib.request.Request(bundle_url, headers=_auth_headers())  # noqa: S310
+                    with urllib.request.urlopen(req, timeout=120) as bresp, open(tar_path, "wb") as out:  # noqa: S310
                         out.write(bresp.read())
                     verify_bundle_sha(tar_path, str(bh))
                     with tarfile.open(tar_path, "r:gz") as tar:
@@ -269,8 +269,8 @@ class WorkerSlot:
 
                 q = urlencode({"run_id": str(run_id)})
                 url = f"{master_url}/api/transfer/get/{quote(proj_name, safe='')}/{quote(src, safe='/')}?{q}"
-                req = urllib.request.Request(url, headers=_transfer_headers(finalize_token))
-                with urllib.request.urlopen(req, timeout=60) as tresp:
+                req = urllib.request.Request(url, headers=_transfer_headers(finalize_token))  # noqa: S310
+                with urllib.request.urlopen(req, timeout=60) as tresp:  # noqa: S310
                     data = tresp.read()
                 dest_path = work_root / dst
                 dest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -310,8 +310,8 @@ class WorkerSlot:
 
                     manifest_url = f"{master_url}/api/data/manifest/{run_id}?run_id={run_id}"
                     try:
-                        mreq = urllib.request.Request(manifest_url, headers=_transfer_headers(finalize_token))
-                        with urllib.request.urlopen(mreq, timeout=30) as mresp:
+                        mreq = urllib.request.Request(manifest_url, headers=_transfer_headers(finalize_token))  # noqa: S310
+                        with urllib.request.urlopen(mreq, timeout=30) as mresp:  # noqa: S310
                             manifest_data = json.loads(mresp.read().decode("utf-8"))
                     except Exception as me:  # noqa: BLE001 - any manifest fetch error skips this data block
                         print(f"[worker] data manifest fetch failed: {me}", file=sys.stderr)
@@ -329,8 +329,8 @@ class WorkerSlot:
                             if not cached.is_file():
                                 blob_url = f"{master_url}/api/data/blob/{sha256}?run_id={run_id}"
                                 try:
-                                    breq = urllib.request.Request(blob_url, headers=_transfer_headers(finalize_token))
-                                    with urllib.request.urlopen(breq, timeout=120) as bresp:
+                                    breq = urllib.request.Request(blob_url, headers=_transfer_headers(finalize_token))  # noqa: S310
+                                    with urllib.request.urlopen(breq, timeout=120) as bresp:  # noqa: S310
                                         data_bytes = bresp.read()
                                     cached.parent.mkdir(parents=True, exist_ok=True)
                                     btmp = cached.with_suffix(".tmp")
@@ -364,8 +364,8 @@ class WorkerSlot:
         print(f"[worker] Synchronizing input data for project '{proj_name}'...")
         try:
             manifest_url = f"{master_url}/api/data/manifest/{proj_name}"
-            manifest_req = urllib.request.Request(manifest_url, headers=_auth_headers())
-            with urllib.request.urlopen(manifest_req, timeout=15) as mresp:
+            manifest_req = urllib.request.Request(manifest_url, headers=_auth_headers())  # noqa: S310
+            with urllib.request.urlopen(manifest_req, timeout=15) as mresp:  # noqa: S310
                 master_manifest = json.loads(mresp.read().decode("utf-8"))
 
             for f_info in master_manifest.get("files") or []:
@@ -387,8 +387,8 @@ class WorkerSlot:
                     local_f.parent.mkdir(parents=True, exist_ok=True)
                     quoted_path = urllib.parse.quote(f_path)
                     file_url = f"{master_url}/api/data/file/{proj_name}/{quoted_path}"
-                    file_req = urllib.request.Request(file_url, headers=_auth_headers())
-                    with urllib.request.urlopen(file_req, timeout=120) as fresp, open(local_f, "wb") as out:
+                    file_req = urllib.request.Request(file_url, headers=_auth_headers())  # noqa: S310
+                    with urllib.request.urlopen(file_req, timeout=120) as fresp, open(local_f, "wb") as out:  # noqa: S310
                         out.write(fresp.read())
                     os.utime(local_f, (time.time(), f_mtime))
         except Exception as e:  # noqa: BLE001 - any data sync error skips the file sync
@@ -417,7 +417,7 @@ class WorkerSlot:
                 from urllib.parse import quote, urlencode
 
                 q = urlencode({"run_id": str(run_id)})
-                upload_req = urllib.request.Request(
+                upload_req = urllib.request.Request(  # noqa: S310
                     f"{master_url}/api/transfer/put/{quote(proj_name, safe='')}/{quote(dst, safe='/')}?{q}",
                     data=data,
                     headers=_transfer_headers(
@@ -426,7 +426,7 @@ class WorkerSlot:
                     ),
                     method="POST",
                 )
-                with urllib.request.urlopen(upload_req, timeout=60) as uresp:
+                with urllib.request.urlopen(upload_req, timeout=60) as uresp:  # noqa: S310
                     uresp.read()
                 print(f"[worker] transfer pull: {src} → master:{dst} ({len(data)} bytes)")
             except Exception as te:  # noqa: BLE001 - any transfer error skips this file
@@ -461,7 +461,7 @@ class WorkerSlot:
                                     rel_str = str(rel_p).replace("\\", "/")
                                     print(f"[worker] Pushing output file: {rel_str}...")
                                     data_bytes = abs_p.read_bytes()
-                                    upload_req = urllib.request.Request(
+                                    upload_req = urllib.request.Request(  # noqa: S310
                                         f"{master_url}/api/data/upload/{proj_name}",
                                         data=data_bytes,
                                         headers=_auth_headers(
@@ -472,7 +472,7 @@ class WorkerSlot:
                                         ),
                                         method="POST",
                                     )
-                                    with urllib.request.urlopen(upload_req, timeout=120) as upload_resp:
+                                    with urllib.request.urlopen(upload_req, timeout=120) as upload_resp:  # noqa: S310
                                         json.loads(upload_resp.read().decode("utf-8"))
                             except Exception as e:  # noqa: BLE001 - any upload error skips this file
                                 print(f"[worker] Output upload error for {f}: {e}", file=sys.stderr)
@@ -499,6 +499,7 @@ class WorkerSlot:
                     pass
 
         stop_flag = sl["stop_flag"]
+        kill_flag = sl.setdefault("kill_flag", [False])  # operator hard stop: no grace
         control_file = sl["control_file"]
         run_id = rid
         task = resp["task"]
@@ -739,9 +740,11 @@ class WorkerSlot:
                     if stop_flag[0]:
                         if stop_seen_at == 0.0:
                             stop_seen_at = time.monotonic()
-                        elif time.monotonic() - stop_seen_at > 60.0:
+                        elif kill_flag[0] or time.monotonic() - stop_seen_at > 60.0:
                             print(
-                                "[worker] stop_requested grace elapsed; terminating",
+                                "[worker] hard stop; killing"
+                                if kill_flag[0]
+                                else "[worker] stop_requested grace elapsed; terminating",
                                 flush=True,
                             )
                             stop_hard[0] = True  # killed on request: interrupted, not failed

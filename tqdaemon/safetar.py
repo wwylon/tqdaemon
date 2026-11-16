@@ -63,4 +63,4 @@ def safe_extract(
     kwargs: dict = {"path": str(dest)}
     if hasattr(tarfile, "data_filter"):
         kwargs["filter"] = "data"
-    tar.extractall(**kwargs)
+    tar.extractall(**kwargs)  # noqa: S202 - members validated above and data filter applied

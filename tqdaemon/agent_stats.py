@@ -58,7 +58,7 @@ def usage_by(
     select = ", ".join(f"{USAGE_DIMS[d]} AS {d}" for d in dims)
     group = ", ".join(USAGE_DIMS[d] for d in dims)
     rows = conn.execute(
-        f"SELECT {select}, SUM(calls) AS calls, "
+        f"SELECT {select}, SUM(calls) AS calls, "  # noqa: S608
         # ``wait.*`` codes (timeout, task failed) are normal wait outcomes, not errors,
         # and must not inflate avg_ms / max_ms (notice latency).
         "SUM(CASE WHEN error_code != '' AND error_code NOT LIKE 'wait.%' THEN calls ELSE 0 END) AS errors, "
@@ -101,7 +101,7 @@ def tasks_by(
         where.append("t.project = ?")
         params.append(project)
     rows = conn.execute(
-        "SELECT t.project, t.status, t.last_error_code, t.submitted_via, t.submitted_by, "
+        "SELECT t.project, t.status, t.last_error_code, t.submitted_via, t.submitted_by, "  # noqa: S608
         "t.client_info, t.enqueued_at, r.wall_sec, "
         "(SELECT COUNT(*) FROM runs x WHERE x.project = t.project AND x.task_id = t.task_id) AS n_runs "
         "FROM tasks t LEFT JOIN runs r ON r.run_id = t.last_run_id "

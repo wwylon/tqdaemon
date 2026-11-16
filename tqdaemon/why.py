@@ -63,6 +63,11 @@ def explain_task(conn: sqlite3.Connection, project: str, task_id: str, *, system
             reasons.append(f"max_attempts reached ({n}/{max_a})")
     if out["block_reason"]:
         reasons.append(f"scheduler: {out['block_reason']}")
+    if status in ("queued", "stopped"):
+        from tqdaemon.estimate import explain_ram_hint
+        from tqdaemon.rows import row_resources
+
+        out["ram_hint"] = explain_ram_hint(conn, project, task_id, row_resources(row))
     if status == "queued":
         plan = build_plan(conn, system=system, limit=200)
         entry = next((e for e in plan["tasks"] if e["project"] == project and e["task_id"] == task_id), None)
@@ -90,6 +95,13 @@ def format_explanation(info: dict[str, Any]) -> str:
         lines.append(f"  dry run: {plan['verdict']}{extra}" + (f" ({plan['reason']})" if plan.get("reason") else ""))
     if plan and plan.get("need") and plan.get("free"):
         lines.append("  " + format_need_free(plan["need"], plan["free"]))
+    hint = info.get("ram_hint")
+    if hint:
+        lines.append(
+            f"  RAM hint {hint['ram_gib']:.1f} GiB from {hint['source']}"
+            + (f" (ignored outlier {hint['dropped_outlier']:.1f} GiB)" if hint.get("dropped_outlier") else "")
+            + f" — wrong? tq hint reset {info['project']}/{info['task_id']}"
+        )
     return "\n".join(lines)
 
 

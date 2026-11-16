@@ -63,7 +63,7 @@ Find out why work failed or what a run consumed.
   stable error code, `task_result` returns the structured result, and
   `report` aggregates recent runs (`kind=hygiene` for churn / multi-use /
   archive proposals — never auto-archives).
-- **CLI:** `tq diagnose`, `tq explain`, `tq metrics`, `tq report`,
+- **CLI:** `tq diagnose`, `tq hint reset`, `tq explain`, `tq metrics`, `tq report`,
   `tq hygiene` (alias for `tq report --hygiene`), `tq diff`, and `tq health`.
 - **Reference:** [Error codes](errors.md).
 

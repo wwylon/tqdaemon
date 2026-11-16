@@ -7,7 +7,7 @@ Full `tq` command table and capability groupings. Install and quickstart: [root 
 Start with the capability you need:
 
 - **Submit:** `tq add`, `tq submit`, `tq clone`, `tq validate`, `tq sync`
-- **Admit:** `tq plan`, `tq why`, `tq force`, `tq priority`, `tq locks`,
+- **Admit:** `tq plan`, `tq why`, `tq start-now`, `tq force`, `tq priority`, `tq locks`, `tq lease`, `tq gpu run`,
   `tq fair-share`, `tq pause`, `tq resume`, `tq freeze`, `tq unfreeze`
 - **Run:** `tq start`, `tq stop-daemon`, `tq restart`, `tq retry`, `tq stop`,
   `tq suspend`, `tq patch`, `tq reverify`, `tq remove`, `tq group`, `tq suite`,
@@ -21,7 +21,7 @@ Start with the capability you need:
 - **Observe:** `tq status`, `tq list`, `tq describe`, `tq top`, `tq capacity`,
   `tq my-tasks`, `tq agents`, `tq doctor`, `tq log`, `tq detect`, `tq usage`
 - **Admin:** `tq archive`, `tq prune`, `tq export`, `tq import`, `tq migrate`,
-  `tq completion`, `tq sleep`, `tq wake`, `tq release`, `tq relocate`
+  `tq completion`, `tq sleep`, `tq wake`, `tq release`, `tq relocate`, `tq project`, `tq drain`
 
 See the [capability guide](../capabilities.md) for the MCP equivalent and
 the full ownership map.
@@ -35,6 +35,8 @@ Exit codes: `0` ok, `1` error, `2` usage (unknown flags or extra args are reject
 | `tq start` | Start daemon (background, detached) |
 | `tq completion bash\|zsh\|pwsh` | Print a shell completion script (commands, subcommands, flags), e.g. `tq completion bash >> ~/.bashrc` or `tq completion pwsh >> $PROFILE`. `tq <command> --help` prints that command's usage without running it |
 | `tq stop-daemon [--force]` | Graceful shutdown; refuses while tasks are running (they would be stopped and re-queued from scratch) unless `--force` |
+| `tq drain [on \| off \| status]` | **Drain mode** for a slow restart: running tasks finish, nothing new starts (queued tasks show `admission drained`, remote workers get no task, UI-forced starts still go through). The web UI shows an amber "Drain mode" banner. Config key `admission_drain` |
+| `tq stop-daemon [--force] [--keep-runs]` | Shut the daemon down; refuses while tasks run (they would be stopped and re-queued). `--keep-runs` leaves runs started with `adopt_on_restart=1` running for the next daemon. While it shuts down the web UI shows a "shutting down" banner (handing tasks over, or stopping them) |
 | `tq restart [--timeout=SEC] [--force]` | Stop, wait for exit, then start (default wait 180s); refuses while tasks are running unless `--force` — except runs started with `adopt_on_restart=1`, which keep running and are adopted by the new daemon ([scheduler.md](../scheduler.md#adopting-running-tasks-across-a-restart)) |
 | `tq status [--project P]` | Running + recent runs. Each running task shows `last progress N ago` and its ETA from the recent progress rate; `POSSIBLY STALLED` when the last `%` change is older than 3x the run's usual interval (and at least 2 min). `--json` adds `progress_health` |
 | `tq clone <project/task_id> <new_id> [--set key=value ...]` | Use a task as a template: copies its YAML document to `<queue_dir>/<new_id>.yaml` with the new id and any `--set` overrides (values parsed as YAML, e.g. `--set priority=80 --set 'args=[--lr, "0.1"]'`). Validated before writing; refuses matrix sources and existing ids. History's **Re-run** re-queues a task with one run's recorded args instead |
@@ -44,12 +46,14 @@ Exit codes: `0` ok, `1` error, `2` usage (unknown flags or extra args are reject
 | `tq health [--line] [--plain] [--json] [--ack]` | Red / amber / green queue verdict shared with the web header and status lines: **red** = a task failed (or ended `unknown`) since the last acknowledge, or the daemon is down; **amber** = acknowledged failures, cap-`interrupted` tasks or frozen runs; **green** = nothing needs a human. Exit **0/1/2** = green/amber/red (`--line` always 0). `--line` is one emoji line for status bars (`--plain` = ASCII), `--ack` turns current failures from red to amber |
 | `tq health --deps [--project P] [--json]` | Submitted-task health: status counts, broken/missing `depends_on`, attention, disabled. Exit **1** if missing deps or attention items |
 | `tq attention [--project P] [--json]` | Tasks needing attention (same set as MCP `attention_list`) |
-| `tq archive [PROJECT ...] [--older-than 30d] [--status completed,failed] [--dry-run]` | Take old finished tasks out of the live queue (default: `completed`, older than 30 days). Each task and its runs are appended to `<home>/archive/<project>.jsonl`, its YAML is moved to `<queue_dir>/archive/` (not synced), and the DB rows are deleted. Running and queued tasks are never archived; tasks that share a multi-task YAML are skipped. Use `--dry-run` first |
+| `tq archive [PROJECT ...] [--older-than 30d] [--status completed,failed] [--task-glob PATTERN] [--dry-run]` | Take old finished tasks out of the live queue (default: `completed`, older than 30 days). Each task and its runs are appended to `<home>/archive/<project>.jsonl`, its YAML is moved to `<queue_dir>/archive/` (not synced), and the DB rows are deleted. Age is `finished_at`. Running and queued tasks are never archived; tasks that share a multi-task YAML are skipped, and so are tasks an unfinished task depends on ("Kept N …"). Web: project page **Archive…**. `--task-glob` limits it to task ids matching a pattern (comma-separated alternatives, e.g. `localize_*`). Use `--dry-run` first |
 | `tq sync [PROJECT ...] [--force] [--require-daemon]` | Re-sync YAML dirs via daemon (HTTP wait up to 10 min). Only changed YAML files are re-read (mtime cache shared with the daemon tick), so a warm sync is fast even with thousands of tasks; `--force` re-reads everything (use it to revert DB-only edits). `PROJECT` limits the sync to named projects. True offline repair exits **2** and prints `[OFFLINE]`; if the daemon pid is up but sync times out, exits **2** without SQLite writes. The same rule applies to `tq stop`, `tq stop-project`, `tq patch` and other mutations: when the daemon pid is alive but does not answer, the CLI reports an error instead of writing SQLite directly. `--require-daemon` refuses offline writes |
 | `tq add <yaml> --project P` | Enqueue from a YAML file |
 | `tq validate [--fix] [path]` | Lint registered (or one) `operator_queue` YAML. `--fix` rewrites known legacy keys (`ram_gib`→`resources.ram_gib`, `timeout_s`→`wall_clock_cap_sec`, `hypothesis`→`x-hypothesis`, drop matching `project`, `name`→`description`); may drop comments |
 | `tq stop <project/task_id> [--force]` | Graceful stop (checkpoint first). Blocked with an error if `started_by` differs from your `TQ_OPERATOR` — pass `--force` to override |
 | `tq stop --project P` | Stop all running tasks in project P |
+| `tq stop <project/task_id> --now` | Hard stop: kill the process tree immediately (no checkpoint grace); `--project P --now` for a whole project. Ends `interrupted` / `tq.stop.killed` |
+| `tq limits [NODE [field=val …]]` | Limits tree all > sets > projects: no args prints it (own caps, `≤N (node)` effective ancestor caps, running); `NODE field=val` sets caps (`all`, set path, project; empty value clears) |
 | `tq retry <project/task_id>… [--downstream] [--enable-downstream]` | Re-queue; `--downstream` retries transitive dependents and prints requeued/skipped; `--enable-downstream` enables then retries. Multiple IDs batch in one DB transaction. |
 | `tq retry --project P [--status failed[,interrupted,…]]` | Retry terminal-retryable in P; optional `--status` filter (comma-separated). Prefers daemon `/api/tasks/retry-batch`. |
 | `tq result <project/task_id>` | Print last non-empty log line; exit 0 iff task `completed` (agents: prefer over `tq tail`) |
@@ -59,21 +63,26 @@ Exit codes: `0` ok, `1` error, `2` usage (unknown flags or extra args are reject
 | `tq pause <project>` / `tq resume <project>` | Pause / unpause scheduling for a project (soft) |
 | `tq freeze <project>` / `tq unfreeze <project>` | **Block new starts** for one project only (`tq.block.frozen`); running continue |
 | `tq release <project>` | Drop the daemon's queue-dir file watch so the project folder can be renamed on Windows (F-240) |
+| `tq project rename <old> <new> [--dry-run] [--no-alias]` | Rename a project **id** with its history: tasks, runs, usage, limits/colour/freeze settings, tokens and workers scoped to it, `depends_on` in other projects, the `projects.yaml` key, the log folder and the archive file move in one step (backups printed; refused while a task of the project runs; `--dry-run` previews). The old name stays an alias so old YAMLs, CLI keys, MCP and API calls keep working. Undo: rename back |
+| `tq project alias [list \| rm <old>]` | Old project names that still resolve to a renamed project |
 | `tq relocate <project> <new_root>` | After a folder move: rewrite `projects.yaml` `root:`, backup `queue.db`, rewrite `yaml_source`, re-watch, sync (F-240) |
 | `tq patch <project/task_id> k=v …` | Patch YAML + sync (`priority`, `enabled`, `wall_clock_cap_sec`, `max_attempts`). `enabled=true` on a terminal task **warns** — still needs `tq retry`. Prints `field: old -> new` and exits 1 if a field did not change in the queue database; exits 3 if a daemon runs but does not answer |
+| `tq start-now <project/task_id>` | Operator start: first in line, ignores RAM/VRAM held for other waiting tasks; still needs real free memory and respects deps, locks and caps |
 | `tq force <project/task_id>` | One-shot bypass of soft resource / anti-flap gates (re-queues; UI shows a toast) |
 | `tq group list\|stop\|retry <project> <group>` | List / stop running / retry failed tasks in a YAML `group:` |
 | `tq remove <project/task_id> [--force]` | Remove one task from DB. Same cross-operator `--force` gate as `tq stop` |
 | `tq remove --project P [--force]` | Purge **all** tasks + runs for project P from DB (remove its `projects.yaml` entry too) |
 | `tq priority <project/task_id> <N> [--force]` | Change priority live (higher N = sooner). Same cross-operator `--force` gate as `tq stop` |
 | `tq migrate priority-invert [--dry-run]` | One-shot remap `priority → 100−N` when switching to higher=sooner; sets `priority_higher_wins` |
-| `tq capacity` | Master + workers free CPU/RAM/GPU (per-device `gpus[]`) |
+| `tq capacity` | Master + workers free CPU/RAM/GPU (per-device `gpus[]`) and active GPU leases |
+| `tq lease acquire --vram GiB [--ttl SEC] [--priority N] [--wait SEC]` / `release <id>` / `list` | Ad-hoc GPU lease for interactive work: waits until the scheduler has the VRAM free (counted like a running task's declared `gpu_vram_gib`), prints the lease id; ends on `release`, TTL expiry (default 900 s) or when the holder process dies |
+| `tq gpu run --vram GiB [--ttl SEC] [--priority N] -- <command>` | Acquire a lease, run the command (env `TQ_GPU_LEASE_ID`), release it on exit; the command's exit code is passed through |
 | `tq plan [N]` | Dry-run: which queued tasks would start next, and why others are blocked (approximate) |
 | `tq report [--project P] [--days N]` | Aggregate runs / error codes |
 | `tq diagnose <project/task_id>` | Deep bundle (runs, log tail, worker, metrics) |
 | `tq metrics <project/task_id> [--json] [--samples N]` | Same run metrics as the UI (CPU/RAM/VRAM/GPU avg, `requires_gpu`, log warn/err counts) |
 | `tq mcp` | Stdio MCP for agents — **setup** (Cursor/Claude) + tools in [`docs/mcp.md`](../mcp.md); opt-in YAML `notify_url` in [`docs/task_standards.md`](../task_standards.md) |
-| `tq export [path] [--with-logs]` | Export master home (DB + projects.yaml) |
+| `tq export [path] [--with-logs] [--with-token]` | Export master home (DB + projects.yaml); the legacy `auth_token` is blanked unless `--with-token` |
 | `tq import <path> [--force]` | Restore master home from export |
 | `tq token generate` | Create and store `auth_token` |
 | `tq config get` / `tq config set k=v …` | Resource / daemon config (`bind_host`, `auth_token`, `prevent_sleep`, `placement_mode=binpack\|first_fit`) |

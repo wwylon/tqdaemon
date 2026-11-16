@@ -17,7 +17,7 @@ from typing import Any
 
 from tqdaemon.jsonutil import json_list
 
-SCHEMA_VERSION = 35
+SCHEMA_VERSION = 37
 
 # Wave D6: keep-set for prune is _CORE_CONFIG_KEYS ∪ VALID_CONFIG_KEYS.
 # New tunables MUST be registered in tqdaemon.config.VALID_CONFIG_KEYS (and
@@ -37,6 +37,10 @@ _CORE_CONFIG_KEYS = (
     "auth_token",
     "prevent_sleep",
     "gpu_first",
+    "admission_drain",
+    "ollama_unload_url",
+    "require_token_local",
+    "cpu_charge_measured",
     "suspend_grace_sec",
     "schema_version",
     "priority_higher_wins",
@@ -324,6 +328,29 @@ CREATE TABLE IF NOT EXISTS api_tokens (
 );
 
 -- C-002 (schema 34): idempotent submits; a retry with the same client_key returns these task_ids.
+-- Old project ids after a rename (tq project rename): the old name keeps resolving to the new one.
+CREATE TABLE IF NOT EXISTS project_aliases (
+    old        TEXT NOT NULL PRIMARY KEY,
+    new        TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+-- T-208: ad-hoc GPU leases (interactive GPU work admitted by the scheduler).
+CREATE TABLE IF NOT EXISTS gpu_leases (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    status      TEXT NOT NULL,
+    vram_gib    REAL NOT NULL,
+    ttl_sec     INTEGER NOT NULL,
+    priority    INTEGER NOT NULL DEFAULT 0,
+    holder      TEXT NOT NULL DEFAULT '',
+    pid         INTEGER,
+    created_at  TEXT NOT NULL,
+    acquired_at TEXT,
+    expires_at  TEXT,
+    released_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_gpu_leases_status ON gpu_leases(status);
+
 CREATE TABLE IF NOT EXISTS submit_keys (
     project    TEXT NOT NULL,
     client_key TEXT NOT NULL,
@@ -350,6 +377,14 @@ _DEFAULT_CONFIG: dict[str, Any] = {
     "prevent_sleep": 1,
     # Start GPU tasks before equal-priority CPU tasks while the GPU is idle (no GPU task running).
     "gpu_first": 1,
+    # `tq drain on`: no new starts; running tasks finish.
+    "admission_drain": 0,
+    # T-209: empty = never unload Ollama models.
+    "ollama_unload_url": "",
+    # S3: 1 = loopback clients need the token as well.
+    "require_token_local": 0,
+    # Opt-in: charge running tasks their measured cores when above declared cpu_cores.
+    "cpu_charge_measured": 0,
     # Wall-clock window between the cooperative-suspend control-file write
     # and SIGTERM, so a task actually has time to checkpoint before being
     # killed. 0 = old behavior (SIGTERM immediately, best-effort only).
@@ -544,6 +579,12 @@ def _open_if_current(db_path: Path) -> sqlite3.Connection | None:
     return None
 
 
+def _ensure_col(conn: sqlite3.Connection, existing: Any, table: str, name: str, definition: str) -> None:
+    """``ALTER TABLE ... ADD COLUMN`` when ``name`` is not in ``existing`` (the table's column names)."""
+    if name not in existing:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")  # noqa: S608 - fixed identifiers
+
+
 def _open_db_impl(db_path: Path, *, migrate: bool = True) -> sqlite3.Connection:
     """Open the queue DB.
 
@@ -569,128 +610,78 @@ def _open_db_impl(db_path: Path, *, migrate: bool = True) -> sqlite3.Connection:
     try:
         cursor = conn.execute("PRAGMA table_info(runs)")
         columns = [row["name"] for row in cursor.fetchall()]
-        if "peak_ram_gib" not in columns:
-            conn.execute("ALTER TABLE runs ADD COLUMN peak_ram_gib REAL")
-        if "peak_vram_gib" not in columns:
-            conn.execute("ALTER TABLE runs ADD COLUMN peak_vram_gib REAL")
-        if "peak_cpu_pct" not in columns:
-            conn.execute("ALTER TABLE runs ADD COLUMN peak_cpu_pct REAL")
-        if "worker_id" not in columns:
-            conn.execute("ALTER TABLE runs ADD COLUMN worker_id TEXT")
-        if "last_error_code" not in columns:
-            conn.execute("ALTER TABLE runs ADD COLUMN last_error_code TEXT")
-        if "lease_expires_at" not in columns:
-            conn.execute("ALTER TABLE runs ADD COLUMN lease_expires_at TEXT")
-        if "pid" not in columns:
-            conn.execute("ALTER TABLE runs ADD COLUMN pid INTEGER")
-        if "pid_create_time" not in columns:
-            conn.execute("ALTER TABLE runs ADD COLUMN pid_create_time REAL")
-        if "sleep_tier" not in columns:
-            conn.execute("ALTER TABLE runs ADD COLUMN sleep_tier INTEGER")
-        if "stopped_by" not in columns:
-            conn.execute("ALTER TABLE runs ADD COLUMN stopped_by TEXT")
-        if "error_category" not in columns:
-            conn.execute("ALTER TABLE runs ADD COLUMN error_category TEXT")
-        if "metrics_json" not in columns:
-            conn.execute("ALTER TABLE runs ADD COLUMN metrics_json TEXT")
-        if "stop_reason" not in columns:
-            conn.execute("ALTER TABLE runs ADD COLUMN stop_reason TEXT")
+        _ensure_col(conn, columns, "runs", "peak_ram_gib", "REAL")
+        _ensure_col(conn, columns, "runs", "peak_vram_gib", "REAL")
+        _ensure_col(conn, columns, "runs", "peak_cpu_pct", "REAL")
+        _ensure_col(conn, columns, "runs", "worker_id", "TEXT")
+        _ensure_col(conn, columns, "runs", "last_error_code", "TEXT")
+        _ensure_col(conn, columns, "runs", "lease_expires_at", "TEXT")
+        _ensure_col(conn, columns, "runs", "pid", "INTEGER")
+        _ensure_col(conn, columns, "runs", "pid_create_time", "REAL")
+        _ensure_col(conn, columns, "runs", "sleep_tier", "INTEGER")
+        _ensure_col(conn, columns, "runs", "stopped_by", "TEXT")
+        _ensure_col(conn, columns, "runs", "error_category", "TEXT")
+        _ensure_col(conn, columns, "runs", "metrics_json", "TEXT")
+        _ensure_col(conn, columns, "runs", "stop_reason", "TEXT")
         if "finalize_token" not in columns:
             # F-055: per-claim secret so only the claiming worker can finalize
             conn.execute("ALTER TABLE runs ADD COLUMN finalize_token TEXT")
         # P9: estimate telemetry — store predicted alongside peak so accuracy
         # is queryable without re-running the estimator.
-        if "estimated_ram_gib" not in columns:
-            conn.execute("ALTER TABLE runs ADD COLUMN estimated_ram_gib REAL")
-        if "estimated_vram_gib" not in columns:
-            conn.execute("ALTER TABLE runs ADD COLUMN estimated_vram_gib REAL")
+        _ensure_col(conn, columns, "runs", "estimated_ram_gib", "REAL")
+        _ensure_col(conn, columns, "runs", "estimated_vram_gib", "REAL")
         # F-150: durable remote log-chunk sequence (survives daemon restart).
-        if "last_log_seq" not in columns:
-            conn.execute("ALTER TABLE runs ADD COLUMN last_log_seq INTEGER")
+        _ensure_col(conn, columns, "runs", "last_log_seq", "INTEGER")
 
         # Resource history — GPU util samples (nullable for older rows)
         rh_cols = {row["name"] for row in conn.execute("PRAGMA table_info(resource_history)").fetchall()}
-        if "gpu_util_pct" not in rh_cols:
-            conn.execute("ALTER TABLE resource_history ADD COLUMN gpu_util_pct REAL")
+        _ensure_col(conn, rh_cols, "resource_history", "gpu_util_pct", "REAL")
 
         cursor = conn.execute("PRAGMA table_info(tasks)")
         task_columns = [row["name"] for row in cursor.fetchall()]
-        if "force_run" not in task_columns:
-            conn.execute("ALTER TABLE tasks ADD COLUMN force_run INTEGER NOT NULL DEFAULT 0")
-        if "exclusive_project" not in task_columns:
-            conn.execute("ALTER TABLE tasks ADD COLUMN exclusive_project INTEGER NOT NULL DEFAULT 0")
-        if "dispatch" not in task_columns:
-            conn.execute("ALTER TABLE tasks ADD COLUMN dispatch TEXT NOT NULL DEFAULT 'local'")
-        if "requires" not in task_columns:
-            conn.execute("ALTER TABLE tasks ADD COLUMN requires TEXT NOT NULL DEFAULT '{}'")
-        if "bundle_hash" not in task_columns:
-            conn.execute("ALTER TABLE tasks ADD COLUMN bundle_hash TEXT")
-        if "code_provider" not in task_columns:
-            conn.execute("ALTER TABLE tasks ADD COLUMN code_provider TEXT NOT NULL DEFAULT ''")
-        if "last_error_code" not in task_columns:
-            conn.execute("ALTER TABLE tasks ADD COLUMN last_error_code TEXT")
-        if "block_reason" not in task_columns:
-            conn.execute("ALTER TABLE tasks ADD COLUMN block_reason TEXT")
+        _ensure_col(conn, task_columns, "tasks", "force_run", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_col(conn, task_columns, "tasks", "exclusive_project", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_col(conn, task_columns, "tasks", "dispatch", "TEXT NOT NULL DEFAULT 'local'")
+        _ensure_col(conn, task_columns, "tasks", "requires", "TEXT NOT NULL DEFAULT '{}'")
+        _ensure_col(conn, task_columns, "tasks", "bundle_hash", "TEXT")
+        _ensure_col(conn, task_columns, "tasks", "code_provider", "TEXT NOT NULL DEFAULT ''")
+        _ensure_col(conn, task_columns, "tasks", "last_error_code", "TEXT")
+        _ensure_col(conn, task_columns, "tasks", "block_reason", "TEXT")
         # v22: provenance (who/how a task was created) -- analytics only, nullable.
         for _col in ("submitted_via", "submitted_by", "client_info"):
             if _col not in task_columns:
                 conn.execute(f"ALTER TABLE tasks ADD COLUMN {_col} TEXT")
-        if "started_by" not in task_columns:
-            conn.execute("ALTER TABLE tasks ADD COLUMN started_by TEXT")
-        if "max_attempts" not in task_columns:
-            conn.execute("ALTER TABLE tasks ADD COLUMN max_attempts INTEGER NOT NULL DEFAULT 0")
-        if "notify_url" not in task_columns:
-            conn.execute("ALTER TABLE tasks ADD COLUMN notify_url TEXT")
-        if "tags" not in task_columns:
-            conn.execute("ALTER TABLE tasks ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'")
-        if "suite" not in task_columns:
-            conn.execute("ALTER TABLE tasks ADD COLUMN suite TEXT NOT NULL DEFAULT ''")
-        if "env" not in task_columns:
-            conn.execute("ALTER TABLE tasks ADD COLUMN env TEXT NOT NULL DEFAULT '{}'")
-        if "idempotent" not in task_columns:
-            conn.execute("ALTER TABLE tasks ADD COLUMN idempotent INTEGER NOT NULL DEFAULT 0")
+        _ensure_col(conn, task_columns, "tasks", "started_by", "TEXT")
+        _ensure_col(conn, task_columns, "tasks", "max_attempts", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_col(conn, task_columns, "tasks", "notify_url", "TEXT")
+        _ensure_col(conn, task_columns, "tasks", "tags", "TEXT NOT NULL DEFAULT '[]'")
+        _ensure_col(conn, task_columns, "tasks", "suite", "TEXT NOT NULL DEFAULT ''")
+        _ensure_col(conn, task_columns, "tasks", "env", "TEXT NOT NULL DEFAULT '{}'")
+        _ensure_col(conn, task_columns, "tasks", "idempotent", "INTEGER NOT NULL DEFAULT 0")
         if "execution_semantics" not in task_columns:
             # R-011: explicit attempt recovery policy (default non_idempotent)
             conn.execute("ALTER TABLE tasks ADD COLUMN execution_semantics TEXT NOT NULL DEFAULT 'non_idempotent'")
-        if "metadata" not in task_columns:
-            conn.execute("ALTER TABLE tasks ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'")
-        if "grp" not in task_columns:
-            conn.execute("ALTER TABLE tasks ADD COLUMN grp TEXT NOT NULL DEFAULT ''")
-        if "artifacts" not in task_columns:
-            conn.execute("ALTER TABLE tasks ADD COLUMN artifacts TEXT NOT NULL DEFAULT '[]'")
-        if "artifacts_required" not in task_columns:
-            conn.execute("ALTER TABLE tasks ADD COLUMN artifacts_required INTEGER NOT NULL DEFAULT 0")
-        if "on_complete" not in task_columns:
-            conn.execute("ALTER TABLE tasks ADD COLUMN on_complete TEXT NOT NULL DEFAULT '[]'")
-        if "on_fail" not in task_columns:
-            conn.execute("ALTER TABLE tasks ADD COLUMN on_fail TEXT NOT NULL DEFAULT '[]'")
-        if "transfer" not in task_columns:
-            conn.execute("ALTER TABLE tasks ADD COLUMN transfer TEXT NOT NULL DEFAULT '[]'")
-        if "requires_services" not in task_columns:
-            conn.execute("ALTER TABLE tasks ADD COLUMN requires_services TEXT NOT NULL DEFAULT '[]'")
-        if "overridable_args" not in task_columns:
-            conn.execute("ALTER TABLE tasks ADD COLUMN overridable_args TEXT NOT NULL DEFAULT '[]'")
+        _ensure_col(conn, task_columns, "tasks", "metadata", "TEXT NOT NULL DEFAULT '{}'")
+        _ensure_col(conn, task_columns, "tasks", "grp", "TEXT NOT NULL DEFAULT ''")
+        _ensure_col(conn, task_columns, "tasks", "artifacts", "TEXT NOT NULL DEFAULT '[]'")
+        _ensure_col(conn, task_columns, "tasks", "artifacts_required", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_col(conn, task_columns, "tasks", "on_complete", "TEXT NOT NULL DEFAULT '[]'")
+        _ensure_col(conn, task_columns, "tasks", "on_fail", "TEXT NOT NULL DEFAULT '[]'")
+        _ensure_col(conn, task_columns, "tasks", "transfer", "TEXT NOT NULL DEFAULT '[]'")
+        _ensure_col(conn, task_columns, "tasks", "requires_services", "TEXT NOT NULL DEFAULT '[]'")
+        _ensure_col(conn, task_columns, "tasks", "overridable_args", "TEXT NOT NULL DEFAULT '[]'")
         if "args_override" not in task_columns:
             # R2: one-shot arg override written by tq retry --set, cleared after pickup
             conn.execute("ALTER TABLE tasks ADD COLUMN args_override TEXT")
-        if "processed_at" not in task_columns:
-            conn.execute("ALTER TABLE tasks ADD COLUMN processed_at TEXT")
-        if "hung_task_k" not in task_columns:
-            conn.execute("ALTER TABLE tasks ADD COLUMN hung_task_k INTEGER")
-        if "finished_at" not in task_columns:
-            conn.execute("ALTER TABLE tasks ADD COLUMN finished_at TEXT")
-        if "schedule" not in task_columns:
-            conn.execute("ALTER TABLE tasks ADD COLUMN schedule TEXT")
-        if "rearm_on" not in task_columns:
-            conn.execute("ALTER TABLE tasks ADD COLUMN rearm_on TEXT NOT NULL DEFAULT ''")
-        if "teardown" not in task_columns:
-            conn.execute("ALTER TABLE tasks ADD COLUMN teardown TEXT")
-        if "yaml_num" not in task_columns:
-            conn.execute("ALTER TABLE tasks ADD COLUMN yaml_num INTEGER")
-        if "auto_retry_on_cap" not in task_columns:
-            conn.execute("ALTER TABLE tasks ADD COLUMN auto_retry_on_cap INTEGER NOT NULL DEFAULT 0")
-        if "max_auto_retries" not in task_columns:
-            conn.execute("ALTER TABLE tasks ADD COLUMN max_auto_retries INTEGER NOT NULL DEFAULT 20")
+        _ensure_col(conn, task_columns, "tasks", "processed_at", "TEXT")
+        _ensure_col(conn, task_columns, "tasks", "hung_task_k", "INTEGER")
+        _ensure_col(conn, task_columns, "tasks", "finished_at", "TEXT")
+        _ensure_col(conn, task_columns, "tasks", "schedule", "TEXT")
+        _ensure_col(conn, task_columns, "tasks", "rearm_on", "TEXT NOT NULL DEFAULT ''")
+        _ensure_col(conn, task_columns, "tasks", "teardown", "TEXT")
+        _ensure_col(conn, task_columns, "tasks", "yaml_num", "INTEGER")
+        _ensure_col(conn, task_columns, "tasks", "auto_retry_on_cap", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_col(conn, task_columns, "tasks", "max_auto_retries", "INTEGER NOT NULL DEFAULT 20")
         if "retry_backoff_sec" not in task_columns:
             # schema 35: exponential backoff between re-admissions of a failing task
             conn.execute("ALTER TABLE tasks ADD COLUMN retry_backoff_sec INTEGER NOT NULL DEFAULT 0")
@@ -703,25 +694,17 @@ def _open_db_impl(db_path: Path, *, migrate: bool = True) -> sqlite3.Connection:
         if "on_dependency_failure" not in task_columns:
             # T-206: block (default) | cancel dependents of a failed dependency
             conn.execute("ALTER TABLE tasks ADD COLUMN on_dependency_failure TEXT NOT NULL DEFAULT 'block'")
-        if "negative_exit_codes" not in task_columns:
-            conn.execute("ALTER TABLE tasks ADD COLUMN negative_exit_codes TEXT NOT NULL DEFAULT '[]'")
-        if "on_dependency_negative" not in task_columns:
-            conn.execute("ALTER TABLE tasks ADD COLUMN on_dependency_negative TEXT NOT NULL DEFAULT 'run'")
-        if "cap_auto_retry_count" not in task_columns:
-            conn.execute("ALTER TABLE tasks ADD COLUMN cap_auto_retry_count INTEGER NOT NULL DEFAULT 0")
-        if "retry_attempt_baseline" not in task_columns:
-            conn.execute("ALTER TABLE tasks ADD COLUMN retry_attempt_baseline INTEGER NOT NULL DEFAULT 0")
+        _ensure_col(conn, task_columns, "tasks", "negative_exit_codes", "TEXT NOT NULL DEFAULT '[]'")
+        _ensure_col(conn, task_columns, "tasks", "on_dependency_negative", "TEXT NOT NULL DEFAULT 'run'")
+        _ensure_col(conn, task_columns, "tasks", "cap_auto_retry_count", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_col(conn, task_columns, "tasks", "retry_attempt_baseline", "INTEGER NOT NULL DEFAULT 0")
         # T-202 / T-203: OR-deps + spawner lineage (runtime column; not wiped by sync)
-        if "depends_on_any" not in task_columns:
-            conn.execute("ALTER TABLE tasks ADD COLUMN depends_on_any TEXT NOT NULL DEFAULT '[]'")
-        if "spawned_by" not in task_columns:
-            conn.execute("ALTER TABLE tasks ADD COLUMN spawned_by TEXT")
+        _ensure_col(conn, task_columns, "tasks", "depends_on_any", "TEXT NOT NULL DEFAULT '[]'")
+        _ensure_col(conn, task_columns, "tasks", "spawned_by", "TEXT")
         # D1: content-addressed data transfer block
-        if "data" not in task_columns:
-            conn.execute("ALTER TABLE tasks ADD COLUMN data TEXT")
+        _ensure_col(conn, task_columns, "tasks", "data", "TEXT")
         # G3: p50 of last-N completed run durations for this task
-        if "predicted_duration_sec" not in task_columns:
-            conn.execute("ALTER TABLE tasks ADD COLUMN predicted_duration_sec REAL")
+        _ensure_col(conn, task_columns, "tasks", "predicted_duration_sec", "REAL")
         # P1: denormalized last run id — eliminates MAX(run_id) subquery in list
         if "last_run_id" not in task_columns:
             conn.execute("ALTER TABLE tasks ADD COLUMN last_run_id INTEGER REFERENCES runs(run_id)")
@@ -732,10 +715,8 @@ def _open_db_impl(db_path: Path, *, migrate: bool = True) -> sqlite3.Connection:
                 ")"
             )
         # Hygiene / scale: denormalized run counts (avoids full runs GROUP BY on tq list)
-        if "total_run_count" not in task_columns:
-            conn.execute("ALTER TABLE tasks ADD COLUMN total_run_count INTEGER NOT NULL DEFAULT 0")
-        if "completed_run_count" not in task_columns:
-            conn.execute("ALTER TABLE tasks ADD COLUMN completed_run_count INTEGER NOT NULL DEFAULT 0")
+        _ensure_col(conn, task_columns, "tasks", "total_run_count", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_col(conn, task_columns, "tasks", "completed_run_count", "INTEGER NOT NULL DEFAULT 0")
         # One-shot backfill when either column was just added or still all zeros with runs present.
         need_backfill = conn.execute(
             "SELECT 1 FROM tasks t WHERE EXISTS ("

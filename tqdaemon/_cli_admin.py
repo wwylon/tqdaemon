@@ -55,7 +55,7 @@ def cmd_start(home: Path) -> int:
         popen_kw = {"start_new_session": True}
     # The child keeps its own copy of the handle; the parent's copy is closed right away.
     with open(log_path, "a", encoding="utf-8", errors="replace") as log_fh:
-        proc = subprocess.Popen(cmd, stdout=log_fh, stderr=subprocess.STDOUT, close_fds=True, **popen_kw)
+        proc = subprocess.Popen(cmd, stdout=log_fh, stderr=subprocess.STDOUT, close_fds=True, **popen_kw)  # noqa: S603
 
     import time
 
@@ -89,11 +89,13 @@ def _running_runs(home: Path, *, skip_adoptable: bool = False) -> list[str]:
     """
     import sqlite3
 
+    from tqdaemon.db import open_ro
+
     db_path = _db(home)
     if not Path(db_path).exists():
         return []
     try:
-        conn = sqlite3.connect(f"file:{Path(db_path).as_posix()}?mode=ro", uri=True, timeout=2)
+        conn = open_ro(db_path, timeout=2)
         try:
             rows = conn.execute(
                 "SELECT project, task_id, worker_id, pid, pid_create_time FROM runs WHERE status='running' ORDER BY run_id"
@@ -117,18 +119,23 @@ def _refuse_if_running(home: Path, verb: str, *, skip_adoptable: bool = False) -
     shown = ", ".join(running[:8]) + (f", +{len(running) - 8} more" if len(running) > 8 else "")
     print(
         f"Refusing to {verb}: {len(running)} task(s) running and would be stopped and re-queued "
-        f"from scratch ({shown}). Use --force to proceed anyway."
+        f"from scratch ({shown}). Use --force to proceed anyway, `tq stop-daemon --keep-runs` to leave "
+        "adoptable runs running, or `tq drain on` first to stop new starts."
     )
     return True
 
 
-def cmd_stop_daemon(home: Path, *, force: bool = False) -> int:
+def cmd_stop_daemon(home: Path, *, force: bool = False, keep_runs: bool = False) -> int:
     pid = _daemon_running(home)
     if not pid:
         print("Daemon not running.")
         return 0
-    if not force and _refuse_if_running(home, "stop the daemon"):
+    if not force and _refuse_if_running(home, "stop the daemon", skip_adoptable=keep_runs):
         return 1
+    if keep_runs:
+        from tqdaemon.adopt import request_keep_runs
+
+        request_keep_runs(home)  # adoptable runs survive; the next daemon adopts them
     import signal
     import sys
 
@@ -153,6 +160,29 @@ def cmd_stop_daemon(home: Path, *, force: bool = False) -> int:
     except OSError as e:
         print(f"Failed to signal daemon: {e}")
         return 1
+
+
+def cmd_drain(home: Path, mode: str) -> int:
+    """``tq drain on|off|status``: stop (or resume) starting new tasks; running tasks are left alone."""
+    from tqdaemon.db import get_config, open_db
+
+    conn = open_db(_db(home))
+    try:
+        if mode in ("on", "off"):
+            rc = cmd_config_set(home, [f"admission_drain={1 if mode == 'on' else 0}"])
+            if rc:
+                return rc
+        draining = bool(int(get_config(conn).get("admission_drain", 0) or 0)) if mode == "status" else mode == "on"
+        running = len(_running_runs(home, skip_adoptable=False))
+    finally:
+        conn.close()
+    state = "ON: no new tasks start" if draining else "off: tasks start normally"
+    print(f"drain {state}; {running} task(s) running.")
+    if draining:
+        print(
+            "Restart when it reaches 0 running, or `tq restart` / `tq stop-daemon --keep-runs` to hand running tasks over."
+        )
+    return 0
 
 
 def cmd_restart(home: Path, *, timeout_sec: float = 180.0, force: bool = False) -> int:
@@ -233,7 +263,7 @@ def cmd_status(home: Path, project: str | None, *, as_json: bool = False) -> int
 
     # I-09: include started_at and progress_pct from the latest run
     running = conn.execute(
-        f"SELECT t.project,t.task_id,t.priority,t.last_error_code,"
+        f"SELECT t.project,t.task_id,t.priority,t.last_error_code,"  # noqa: S608
         f" r.started_at, r.progress_pct, r.metrics_json"
         f" FROM tasks t"
         f" LEFT JOIN runs r ON r.project=t.project AND r.task_id=t.task_id"
@@ -242,7 +272,7 @@ def cmd_status(home: Path, project: str | None, *, as_json: bool = False) -> int
         params,
     ).fetchall()
     queued = conn.execute(
-        f"SELECT project,task_id,priority,last_error_code,block_reason FROM tasks WHERE status='queued' {where_t} ORDER BY priority DESC, enqueued_at ASC",
+        f"SELECT project,task_id,priority,last_error_code,block_reason FROM tasks WHERE status='queued' {where_t} ORDER BY priority DESC, enqueued_at ASC",  # noqa: S608
         params,
     ).fetchall()
     # Last run's progress rides along so `tq status` shows how far failed / stopped runs got.
@@ -332,7 +362,7 @@ def cmd_status(home: Path, project: str | None, *, as_json: bool = False) -> int
     where_runs = "WHERE project=?" if project else ""
     params_runs = (project,) if project else ()
     recent = conn.execute(
-        f"SELECT project,task_id,status,started_at,finished_at,exit_code,worker_id,last_error_code FROM runs "
+        f"SELECT project,task_id,status,started_at,finished_at,exit_code,worker_id,last_error_code FROM runs "  # noqa: S608
         f"{where_runs} "
         f"ORDER BY run_id DESC LIMIT 5",
         params_runs,
@@ -825,7 +855,7 @@ def cmd_mcp(home: Path) -> int:
     return run_stdio(home)
 
 
-def cmd_export(home: Path, dest: str | None, *, with_logs: bool) -> int:
+def cmd_export(home: Path, dest: str | None, *, with_logs: bool, with_token: bool = False) -> int:
     from datetime import datetime
 
     from tqdaemon.export_import import export_home
@@ -834,11 +864,13 @@ def cmd_export(home: Path, dest: str | None, *, with_logs: bool) -> int:
         ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         dest = str(home / "exports" / f"tqdaemon-{ts}.tar.gz")
     try:
-        path = export_home(home, Path(dest), with_logs=with_logs)
+        path = export_home(home, Path(dest), with_logs=with_logs, scrub_token=not with_token)
     except RuntimeError as exc:
         print(f"Error: {exc}")
         return 1
     print(f"Exported -> {path}")
+    if not with_token:
+        print("auth_token was blanked in the archive (pass --with-token to keep it); set it again after import.")
     return 0
 
 
@@ -1363,12 +1395,12 @@ def cmd_master_migrate(home: Path, target_url: str) -> int:
     # --- 1. Verify target is in standby ---
     print(f"Connecting to {target_url} ...")
     try:
-        req0 = _urlreq.Request(
+        req0 = _urlreq.Request(  # noqa: S310
             f"{target_url}/api/status",
             headers=_auth_headers(),
             method="GET",
         )
-        with _urlreq.urlopen(req0, timeout=10) as r:
+        with _urlreq.urlopen(req0, timeout=10) as r:  # noqa: S310
             tgt_status = _json.loads(r.read())
     except _urlerr.URLError as exc:
         print(f"error: cannot reach target: {exc}")
@@ -1408,7 +1440,7 @@ def cmd_master_migrate(home: Path, target_url: str) -> int:
 
         # --- 3. POST archive to target ---
         data = archive.read_bytes()
-        req = _urlreq.Request(
+        req = _urlreq.Request(  # noqa: S310
             f"{target_url}/api/import",
             data=data,
             headers=_auth_headers(
@@ -1420,7 +1452,7 @@ def cmd_master_migrate(home: Path, target_url: str) -> int:
             method="POST",
         )
         try:
-            with _urlreq.urlopen(req, timeout=120) as r:
+            with _urlreq.urlopen(req, timeout=120) as r:  # noqa: S310
                 result = _json.loads(r.read())
         except _urlerr.URLError as exc:
             print(f"error: import upload failed: {exc}")
@@ -1432,12 +1464,12 @@ def cmd_master_migrate(home: Path, target_url: str) -> int:
 
     # --- 4. Verify target row counts ---
     try:
-        req_st = _urlreq.Request(
+        req_st = _urlreq.Request(  # noqa: S310
             f"{target_url}/api/status",
             headers=_auth_headers(),
             method="GET",
         )
-        with _urlreq.urlopen(req_st, timeout=10) as r:
+        with _urlreq.urlopen(req_st, timeout=10) as r:  # noqa: S310
             tgt_status2 = _json.loads(r.read())
     except _urlerr.URLError as exc:
         print(f"warning: could not re-read target status: {exc}")
@@ -1464,13 +1496,13 @@ def cmd_master_migrate(home: Path, target_url: str) -> int:
     _local_port = int(_cfg.get("web_port", 8765))
     _local_url = f"http://127.0.0.1:{_local_port}"
     try:
-        req2 = _urlreq.Request(
+        req2 = _urlreq.Request(  # noqa: S310
             f"{_local_url}/api/yield-master",
             data=b"",
             headers=_auth_headers(),
             method="POST",
         )
-        with _urlreq.urlopen(req2, timeout=10) as r:
+        with _urlreq.urlopen(req2, timeout=10) as r:  # noqa: S310
             _json.loads(r.read())
         print("  source lease yielded via API.")
     except _urlerr.URLError:
@@ -1492,13 +1524,13 @@ def cmd_master_migrate(home: Path, target_url: str) -> int:
 
     # --- 6. Promote target ---
     try:
-        req3 = _urlreq.Request(
+        req3 = _urlreq.Request(  # noqa: S310
             f"{target_url}/api/promote",
             data=b"",
             headers=_auth_headers(),
             method="POST",
         )
-        with _urlreq.urlopen(req3, timeout=10) as r:
+        with _urlreq.urlopen(req3, timeout=10) as r:  # noqa: S310
             prom = _json.loads(r.read())
         print(f"  target promoted: {prom.get('message', 'ok')}")
     except _urlerr.URLError as exc:

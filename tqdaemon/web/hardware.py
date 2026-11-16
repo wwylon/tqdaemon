@@ -91,7 +91,7 @@ def _windows_gpu_process_memory() -> dict[str, dict[int, int]]:
     out: dict[str, dict[int, int]] = {}
     try:
         proc = subprocess.run(
-            ["typeperf", r"\GPU Process Memory(*)\Dedicated Usage", "-sc", "1"],
+            ["typeperf", r"\GPU Process Memory(*)\Dedicated Usage", "-sc", "1"],  # noqa: S607
             capture_output=True,
             text=True,
             timeout=8,

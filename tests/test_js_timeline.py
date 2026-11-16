@@ -148,3 +148,33 @@ console.log('RESULT:' + JSON.stringify(r));
 """
     )
     assert out["manual"] >= 1 and out["autoSkipped"] is True and out["forcedAgain"] is True
+
+
+def test_not_shown_list_groups_reasons_and_hides_when_empty():
+    data = dict(DATA)
+    data["not_shown"] = [
+        {"project": "r", "task_id": "a", "reason": "paused", "detail": ""},
+        {"project": "c", "task_id": "t<x>", "reason": "dead_dep", "detail": "smoke [failed]"},
+    ]
+    out = run_js(
+        EV
+        + f"""
+let withNs = true;
+const {{ g, doc }} = await setup({{ app: true, routes: {{ '/api/timeline': () => (withNs ? {json.dumps(data)} : {json.dumps(DATA)}) }} }});
+await g.flush();
+const r = {{}};
+await g._loadTimelineNow();
+const el = doc.getElementById('tl-notshown');
+r.html = el.innerHTML;
+withNs = false;
+await g._loadTimelineNow();
+r.after = el.innerHTML;
+console.log('RESULT:' + JSON.stringify(r));
+"""
+    )
+    h = out["html"]
+    assert "<details" in h and "<summary>" in h
+    assert h.count("tqOpenDrawer") == 2
+    assert "c/t&lt;x&gt;" in h and "tl.ns.waitsOn" in h
+    assert h.index("r/a") < h.index("c/t&lt;x&gt;")  # paused group before dead dependency
+    assert out["after"] == ""

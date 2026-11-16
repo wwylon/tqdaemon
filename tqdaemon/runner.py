@@ -152,11 +152,16 @@ class ActiveRun:
         self._done = threading.Event()
         self._exit_code: int | None = None
         self.peak_ram_gib: float = 0.0
+        # C2: private (unshared) bytes over the same tree. RSS counts shared/mapped pages once per
+        # process, so multi-process tasks over-read; recorded for comparison, not yet used for admission.
+        self.peak_private_gib: float = 0.0
         self.peak_vram_gib: float = 0.0
         self.peak_cpu_pct: float = 0.0
         self.current_ram_gib: float = 0.0
         self.current_vram_gib: float = 0.0
         self.current_cpu_pct: float = 0.0
+        # C4: smoothed host-percent CPU (~30 s half-life at a 5 s tick) for opt-in measured-core charging.
+        self.cpu_pct_ema: float = 0.0
         # F-066: cumulative process CPU time (user+system) for usage accounting
         self.accumulated_cpu_seconds: float = 0.0
         self._flushed_cpu_seconds: float = 0.0
@@ -840,6 +845,15 @@ class ActiveRun:
                 _log.debug("artifact check failed", exc_info=True)
 
         self.update_db_progress_light(conn=self.conn)
+        if self.peak_private_gib > 0 and self.peak_ram_gib >= 2.0 and self.peak_private_gib < 0.5 * self.peak_ram_gib:
+            _log.warning(
+                "%s/%s: peak RSS %.1f GiB but private bytes only %.1f GiB (shared pages counted per "
+                "process; the RAM hint may over-read)",
+                self.project,
+                self.task_id,
+                self.peak_ram_gib,
+                self.peak_private_gib,
+            )
         from tqdaemon.db import finalize_run_and_task
 
         if not finalize_run_and_task(
@@ -964,6 +978,19 @@ class ActiveRun:
             return True
         return (time.monotonic() - self.suspend_requested_at) >= grace_sec
 
+    def kill_now(self) -> None:
+        """Operator hard stop: kill the whole process tree with no grace.
+
+        Upgrades a cooperative stop that is already waiting out its grace period."""
+        self.stop_reason = "killed"
+        proc = self.proc
+        if self._stop_in_progress and proc is not None and proc.poll() is None:
+            from tqdaemon.reap import kill_process_tree
+
+            kill_process_tree(proc.pid, create_time=getattr(self, "_pid_create_time", None), graceful_sec=0.0)
+            return
+        self.stop(background=True)
+
     def stop(self, *, background: bool = False) -> None:
         """Graceful stop of the process tree: SIGTERM, wait, then SIGKILL.
 
@@ -1001,7 +1028,7 @@ class ActiveRun:
 
         # Host RAM/VRAM eviction must free RSS quickly; a long graceful wait
         # leaves the machine thrashing while the victim still holds memory.
-        resource_evict = self.stop_reason in ("ram_hard", "vram_hard")
+        resource_evict = self.stop_reason in ("ram_hard", "vram_hard", "killed")
         grace = 0.0 if resource_evict else float(self.graceful_stop_sec)
         pid = self.proc.pid
         create_time = getattr(self, "_pid_create_time", None)
@@ -1084,6 +1111,7 @@ class ActiveRun:
             return None
         pid = self.proc.pid
         ram_bytes = 0
+        private_bytes = 0
         cpu_pct = 0.0
         live_pids: set[int] = set()
         try:
@@ -1103,7 +1131,9 @@ class ActiveRun:
                 live_pids.update(c.pid for c in children)
             for p in procs:
                 try:
-                    ram_bytes += p.memory_info().rss
+                    mi = p.memory_info()
+                    ram_bytes += mi.rss
+                    private_bytes += int(getattr(mi, "private", 0) or 0)
                     cpu_pct += self._get_psutil_proc(p.pid).cpu_percent(interval=None)
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass
@@ -1114,7 +1144,13 @@ class ActiveRun:
         ram_gib = ram_bytes / (1024**3)
         self.current_ram_gib = ram_gib
         self.peak_ram_gib = max(self.peak_ram_gib, ram_gib)
+        self.peak_private_gib = max(self.peak_private_gib, private_bytes / (1024**3))
         self.current_cpu_pct = cpu_pct / _CPU_COUNT
+        self.cpu_pct_ema = (
+            self.current_cpu_pct
+            if self.cpu_pct_ema <= 0.0
+            else (self.cpu_pct_ema + 0.11 * (self.current_cpu_pct - self.cpu_pct_ema))
+        )
         self.peak_cpu_pct = max(self.peak_cpu_pct, self.current_cpu_pct)
         return live_pids
 
@@ -1180,7 +1216,7 @@ class ActiveRun:
                 return
             util_out = shared_gpu_probe(
                 "util",
-                lambda: subprocess.check_output(
+                lambda: subprocess.check_output(  # noqa: S603
                     [smi, "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
                     timeout=2,
                     text=True,

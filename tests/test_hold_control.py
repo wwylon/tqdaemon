@@ -49,7 +49,7 @@ def test_maybe_hold_respects_until(tmp_path: Path, monkeypatch) -> None:
 
     ctrl = tmp_path / "ctrl.json"
     monkeypatch.setenv("TQ_CONTROL_FILE", str(ctrl))
-    until = time.time() + 0.35
+    until = time.time() + 30.0  # far enough that a loaded host cannot expire it mid-test
     ctrl.write_text(json.dumps({"action": "hold", "until": until}), encoding="utf-8")
     slept: list[float] = []
 

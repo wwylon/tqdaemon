@@ -31,11 +31,18 @@ def archive_tasks(
     dry_run: bool = False,
     now: str | None = None,
     max_completed_runs: int | None = None,
+    task_glob: str | None = None,
 ) -> dict[str, Any]:
-    """Archive tasks in ``statuses`` whose ``updated_at`` is older than ``older_than_days``.
+    """Archive tasks in ``statuses`` that finished more than ``older_than_days`` ago.
+
+    Age is ``finished_at`` (falls back to ``updated_at`` for rows that never finished): YAML
+    sync rewrites ``updated_at`` on every pass, so it cannot tell old tasks from new ones.
 
     ``max_completed_runs`` (optional): skip tasks with ``completed_run_count`` greater than
     this value (keeps multi-use / often re-run tasks). ``None`` = no limit (backward compatible).
+
+    ``task_glob`` (optional): only tasks whose ``task_id`` matches this ``fnmatch`` pattern (comma-separated
+    patterns are alternatives), e.g. ``localize_ui_messages__*``.
     """
     statuses = tuple(s for s in statuses if s not in _NEVER)
     if not statuses:
@@ -43,7 +50,7 @@ def archive_tasks(
     ref = datetime.fromisoformat(now) if now else datetime.now(UTC).replace(tzinfo=None)
     cutoff = (ref - timedelta(days=older_than_days)).isoformat()
     marks = ",".join("?" * len(statuses))
-    sql = f"SELECT * FROM tasks WHERE status IN ({marks}) AND updated_at < ?"
+    sql = f"SELECT * FROM tasks WHERE status IN ({marks}) AND COALESCE(finished_at, updated_at) < ?"  # noqa: S608
     params: list[Any] = [*statuses, cutoff]
     if only_projects:
         sql += f" AND project IN ({','.join('?' * len(only_projects))})"
@@ -52,12 +59,30 @@ def archive_tasks(
         sql += " AND COALESCE(completed_run_count, 0) <= ?"
         params.append(int(max_completed_runs))
     rows = conn.execute(sql + " ORDER BY project, task_id", params).fetchall()
+    if task_glob:
+        import fnmatch
+
+        pats = [p.strip() for p in task_glob.split(",") if p.strip()]
+        rows = [r for r in rows if any(fnmatch.fnmatchcase(str(r["task_id"]), p) for p in pats)]
+    needed = _needed_dependencies(conn)
+    kept = 0
     done: list[dict[str, str]] = []
+    pending: list[tuple[str | None, Any]] = []  # YAMLs to move once their rows are committed
+
+    def _flush() -> None:
+        conn.commit()
+        for src_, proj_obj in pending:
+            _move_yaml(src_, proj_obj)
+        pending.clear()
+
     for row in rows:
         proj, tid = row["project"], row["task_id"]
         src = row["yaml_source"] if has_col(row, "yaml_source") else None
         if not _movable(src):
             continue  # shares a YAML with other tasks: sync would resurrect it
+        if (proj, tid) in needed:
+            kept += 1  # an unfinished task depends on it; a missing dependency blocks forever
+            continue
         done.append({"project": proj, "task_id": tid})
         if dry_run:
             continue
@@ -66,13 +91,40 @@ def archive_tasks(
         out.mkdir(parents=True, exist_ok=True)
         with open(out / f"{proj}.jsonl", "a", encoding="utf-8") as fh:
             fh.write(json.dumps({"task": dict(row), "runs": runs}, default=str) + "\n")
-        _move_yaml(src, projects.get(proj))
+        # Task row first: tasks.last_run_id references runs(run_id).
+        conn.execute("DELETE FROM tasks WHERE project = ? AND task_id = ?", (proj, tid))
         for r in runs:
             conn.execute("DELETE FROM resource_history WHERE run_id = ?", (r["run_id"],))
         conn.execute("DELETE FROM runs WHERE project = ? AND task_id = ?", (proj, tid))
-        conn.execute("DELETE FROM tasks WHERE project = ? AND task_id = ?", (proj, tid))
-        conn.commit()
-    return {"archived": len(done), "tasks": done, "dry_run": dry_run, "max_completed_runs": max_completed_runs}
+        pending.append((src, projects.get(proj)))
+        if len(pending) >= 200:  # one write transaction per batch, not per task
+            _flush()
+    if not dry_run:
+        _flush()
+    return {
+        "archived": len(done),
+        "tasks": done,
+        "dry_run": dry_run,
+        "max_completed_runs": max_completed_runs,
+        "kept_as_dependency": kept,
+    }
+
+
+def _needed_dependencies(conn) -> set[tuple[str, str]]:
+    """(project, task_id) named in depends_on / depends_on_any of any task that has not finished."""
+    from tqdaemon.deprefs import resolve_dep_ref
+    from tqdaemon.jsonutil import parse_json_list
+
+    out: set[tuple[str, str]] = set()
+    for r in conn.execute(
+        "SELECT project, depends_on, depends_on_any FROM tasks "
+        "WHERE status IN ('queued','running','suspended','interrupted') "
+        "AND (COALESCE(depends_on,'') NOT IN ('','[]','null') OR COALESCE(depends_on_any,'') NOT IN ('','[]','null'))"
+    ).fetchall():
+        for ref in [*parse_json_list(r["depends_on"]), *parse_json_list(r["depends_on_any"])]:
+            dp, did, _ = resolve_dep_ref(str(r["project"]), str(ref))
+            out.add((dp, did))
+    return out
 
 
 def _movable(src: str | None) -> bool:

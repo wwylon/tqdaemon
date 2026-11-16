@@ -32,6 +32,11 @@ def cmd_capacity(home: Path) -> None:
     print(f"running_reservations: {len(cap['running_reservations'])}")
     for r in cap["running_reservations"][:20]:
         print(f"  {r['project']}/{r['task_id']} cpu={r['cpu_cores']} gpu={r['gpu_vram_gib']}")
+    leases = cap.get("gpu_leases") or []
+    if leases:
+        print(f"gpu_leases: {len(leases)}")
+        for lease in leases:
+            print(f"  lease {lease['id']} {lease['status']} {lease['vram_gib']} GiB holder={lease['holder'] or '-'}")
 
 
 def cmd_worker_list(home: Path) -> int:
@@ -278,10 +283,10 @@ def cmd_worker_doctor(home: Path, *, master_url: str | None = None) -> int:
     print(f"master_url: {url or '(none)'}")
     if url:
         try:
-            req = urllib.request.Request(f"{url}/api/status", method="GET")
+            req = urllib.request.Request(f"{url}/api/status", method="GET")  # noqa: S310
             if token:
                 req.add_header("Authorization", f"Bearer {token}")
-            with urllib.request.urlopen(req, timeout=5) as resp:
+            with urllib.request.urlopen(req, timeout=5) as resp:  # noqa: S310
                 print(f"master reachability: OK HTTP {resp.status}")
         except Exception as exc:  # noqa: BLE001 - reachability check reports any failure
             print(f"master reachability: FAIL ({exc})")
@@ -337,7 +342,7 @@ def cmd_worker_build_wheel(home: Path) -> int:
             ["uv", "build", "--wheel", "--out-dir", str(tmp_path), str(src_root)],
             [sys.executable, "-m", "build", "--wheel", "--outdir", str(tmp_path), str(src_root)],
         ):
-            result = subprocess.run(cmd, capture_output=True, text=True)
+            result = subprocess.run(cmd, capture_output=True, text=True)  # noqa: S603
             if result.returncode == 0:
                 built = True
                 break

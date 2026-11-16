@@ -106,7 +106,7 @@ def backoff_left_bulk(
     # Chunked OR is fine for admit window ≤256.
     clauses = " OR ".join(["(project = ? AND task_id = ?)"] * len(need))
     run_rows = conn.execute(
-        f"SELECT project, task_id, status, finished_at, run_id FROM runs "
+        f"SELECT project, task_id, status, finished_at, run_id FROM runs "  # noqa: S608
         f"WHERE finished_at IS NOT NULL AND ({clauses}) "
         f"ORDER BY run_id DESC",
         flat_args,

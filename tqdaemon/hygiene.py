@@ -100,32 +100,32 @@ def _churn(
 ) -> dict[str, Any]:
     added = int(
         conn.execute(
-            f"SELECT COUNT(*) FROM tasks WHERE enqueued_at >= ?{proj_sql}",
+            f"SELECT COUNT(*) FROM tasks WHERE enqueued_at >= ?{proj_sql}",  # noqa: S608
             [since, *params_base],
         ).fetchone()[0]
     )
     added_24h = int(
         conn.execute(
-            f"SELECT COUNT(*) FROM tasks WHERE enqueued_at >= ?{proj_sql}",
+            f"SELECT COUNT(*) FROM tasks WHERE enqueued_at >= ?{proj_sql}",  # noqa: S608
             [since_24h, *params_base],
         ).fetchone()[0]
     )
     started = int(
         conn.execute(
-            f"SELECT COUNT(*) FROM runs WHERE started_at >= ?{proj_sql}",
+            f"SELECT COUNT(*) FROM runs WHERE started_at >= ?{proj_sql}",  # noqa: S608
             [since, *params_base],
         ).fetchone()[0]
     )
     started_24h = int(
         conn.execute(
-            f"SELECT COUNT(*) FROM runs WHERE started_at >= ?{proj_sql}",
+            f"SELECT COUNT(*) FROM runs WHERE started_at >= ?{proj_sql}",  # noqa: S608
             [since_24h, *params_base],
         ).fetchone()[0]
     )
     by_status = {
         str(r["status"] or "unknown"): int(r["n"])
         for r in conn.execute(
-            f"SELECT status, COUNT(*) AS n FROM runs WHERE started_at >= ?{proj_sql} GROUP BY status",
+            f"SELECT status, COUNT(*) AS n FROM runs WHERE started_at >= ?{proj_sql} GROUP BY status",  # noqa: S608
             [since, *params_base],
         )
     }
@@ -140,7 +140,7 @@ def _churn(
                 SELECT MIN(r2.run_id) FROM runs r2
                 WHERE r2.project = r.project AND r2.task_id = r.task_id
               )
-            """,
+            """,  # noqa: S608
             [since, *params_base],
         ).fetchone()[0]
     )
@@ -153,7 +153,7 @@ def _churn(
                 SELECT MIN(r2.run_id) FROM runs r2
                 WHERE r2.project = r.project AND r2.task_id = r.task_id
               )
-            """,
+            """,  # noqa: S608
             [since_24h, *params_base],
         ).fetchone()[0]
     )
@@ -165,7 +165,7 @@ def _churn(
             SELECT substr(started_at, 1, 10) AS day, COUNT(*) AS n
             FROM runs WHERE started_at >= ?{proj_sql}
             GROUP BY day ORDER BY day
-            """,
+            """,  # noqa: S608
             [since, *params_base],
         )
     ]
@@ -176,7 +176,7 @@ def _churn(
             SELECT substr(enqueued_at, 1, 10) AS day, COUNT(*) AS n
             FROM tasks WHERE enqueued_at >= ?{proj_sql}
             GROUP BY day ORDER BY day
-            """,
+            """,  # noqa: S608
             [since, *params_base],
         )
     ]
@@ -187,7 +187,7 @@ def _churn(
             SELECT project, COUNT(*) AS n FROM runs
             WHERE started_at >= ?{proj_sql}
             GROUP BY project ORDER BY n DESC LIMIT ?
-            """,
+            """,  # noqa: S608
             [since, *params_base, TOP_PROJECTS],
         )
     ]
@@ -198,7 +198,7 @@ def _churn(
             SELECT project, COUNT(*) AS n FROM tasks
             WHERE enqueued_at >= ?{proj_sql}
             GROUP BY project ORDER BY n DESC LIMIT ?
-            """,
+            """,  # noqa: S608
             [since, *params_base, TOP_PROJECTS],
         )
     ]
@@ -234,7 +234,7 @@ def _classify_tasks(
                COALESCE(total_run_count, 0) AS total_run_count,
                COALESCE(completed_run_count, 0) AS completed_run_count
         FROM tasks WHERE 1=1{proj_sql}
-        """,
+        """,  # noqa: S608
         params_base,
     ).fetchall()
     # Completed-day counts in window for multi-use alternate rule.
@@ -244,7 +244,7 @@ def _classify_tasks(
         FROM runs
         WHERE status = 'completed' AND finished_at >= ?{proj_sql}
         GROUP BY project, task_id
-        """,
+        """,  # noqa: S608
         [since, *params_base],
     ).fetchall()
     days_map = {(r["project"], r["task_id"]): int(r["days"]) for r in day_rows}
@@ -256,7 +256,7 @@ def _classify_tasks(
         FROM runs WHERE status = 'completed'{proj_sql}
         GROUP BY project, task_id
         HAVING COUNT(*) >= ?
-        """,
+        """,  # noqa: S608
         [*params_base, MULTI_USE_MIN_COMPLETED],
     ).fetchall()
     span_map: dict[tuple[str, str], float] = {}

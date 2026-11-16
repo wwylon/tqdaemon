@@ -36,14 +36,14 @@ def post_json(url: str, data: dict, *, timeout: float = 30) -> dict | None:
     Auth-fail streak is stored on the function (``post_json._auth_fail_streak``) so
     tests and ``worker._post`` aliases can reset/inspect it.
     """
-    req = urllib.request.Request(
+    req = urllib.request.Request(  # noqa: S310
         url,
         data=json.dumps(data).encode("utf-8"),
         headers=_auth_headers({"Content-Type": "application/json"}),
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
             post_json._auth_fail_streak = 0  # type: ignore[attr-defined]
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
@@ -77,8 +77,8 @@ post_json._auth_fail_streak = 0  # type: ignore[attr-defined]
 
 def get_json(url: str, timeout: float = 10) -> dict | None:
     try:
-        req = urllib.request.Request(url, headers=_auth_headers(), method="GET")
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        req = urllib.request.Request(url, headers=_auth_headers(), method="GET")  # noqa: S310
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
             return json.loads(resp.read().decode("utf-8"))
     except Exception as e:  # noqa: BLE001 - any network error is reported; the loop continues
         print(f"[worker] API error (GET {url}): {e}", file=sys.stderr)

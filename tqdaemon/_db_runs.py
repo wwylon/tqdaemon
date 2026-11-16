@@ -120,7 +120,7 @@ def finish_run(
     wall_sec_expr = "CAST(ROUND((julianday(?) - julianday(started_at)) * 86400) AS INTEGER)"
     if peak_ram_gib is not None or peak_vram_gib is not None or peak_cpu_pct is not None:
         sql = (
-            f"UPDATE runs SET finished_at = ?, wall_sec = {wall_sec_expr}, "
+            f"UPDATE runs SET finished_at = ?, wall_sec = {wall_sec_expr}, "  # noqa: S608
             "exit_code = ?, status = ?, last_error_code = ?, "
             "lease_expires_at = NULL, peak_ram_gib = COALESCE(?, peak_ram_gib), "
             "peak_vram_gib = COALESCE(?, peak_vram_gib), peak_cpu_pct = COALESCE(?, peak_cpu_pct), "
@@ -144,7 +144,7 @@ def finish_run(
         )
     else:
         sql = (
-            f"UPDATE runs SET finished_at = ?, wall_sec = {wall_sec_expr}, "
+            f"UPDATE runs SET finished_at = ?, wall_sec = {wall_sec_expr}, "  # noqa: S608
             "exit_code = ?, status = ?, last_error_code = ?, "
             "lease_expires_at = NULL, stopped_by = COALESCE(?, stopped_by), "
             "stop_reason = COALESCE(stop_reason, ?), error_category = ? WHERE run_id = ?"
@@ -377,7 +377,7 @@ def reclaim_expired_leases(conn: sqlite3.Connection, *, heartbeat_sec: float = 3
     if worker_ids:
         marks = ",".join("?" * len(worker_ids))
         for wr in conn.execute(
-            f"SELECT worker_id, last_seen FROM workers WHERE worker_id IN ({marks})",
+            f"SELECT worker_id, last_seen FROM workers WHERE worker_id IN ({marks})",  # noqa: S608
             worker_ids,
         ).fetchall():
             last_seen_by_worker[str(wr["worker_id"])] = wr["last_seen"]
@@ -457,7 +457,19 @@ def mark_stale_workers_offline(conn: sqlite3.Connection, offline_sec: int | None
     return cur.rowcount or 0
 
 
-def force_task(conn: sqlite3.Connection, project: str, task_id: str) -> str | None:
+FORCE_RUN = 1  # tasks.force_run: bypass every soft gate once (UI Force / `tq force`)
+START_NOW = 2  # tasks.force_run: operator start — first in line, ignores RAM/VRAM held for other tasks
+
+
+def start_now_task(conn: sqlite3.Connection, project: str, task_id: str) -> str | None:
+    """Operator "Start now": re-queue the task first in line, ignoring holds for other waiting tasks.
+
+    Unlike :func:`force_task` it still needs real headroom (live usage + estimate under the soft
+    limit) and respects every other rule (deps, locks, project/set/global caps)."""
+    return force_task(conn, project, task_id, mode=START_NOW)
+
+
+def force_task(conn: sqlite3.Connection, project: str, task_id: str, *, mode: int = FORCE_RUN) -> str | None:
     """Mark task to bypass resource limits. Returns error string, or None on success."""
     task = get_task_status(conn, project, task_id)
     if not task:
@@ -468,9 +480,9 @@ def force_task(conn: sqlite3.Connection, project: str, task_id: str) -> str | No
     # Clear stop_requested so an earlier stop (esp. offline) cannot immediately
     # re-stop the task after force requeues it.
     cur = conn.execute(
-        "UPDATE tasks SET status = ?, force_run = 1, enabled = 1, stop_requested = 0 "
+        "UPDATE tasks SET status = ?, force_run = ?, enabled = 1, stop_requested = 0 "
         "WHERE project = ? AND task_id = ? AND status != 'running'",
-        ("queued", project, task_id),
+        ("queued", int(mode), project, task_id),
     )
     conn.commit()
     if (cur.rowcount or 0) == 0:
@@ -499,6 +511,10 @@ def remove_task(conn: sqlite3.Connection, project: str, task_id: str) -> str | N
     )
     if cur.rowcount == 0:
         conn.rollback()
+        # C6: the row may simply be gone (a concurrent sync/removal won the race). That is a
+        # success for a remove, not "currently running" (llm_localize saw exactly this).
+        if get_task_status(conn, project, task_id) is None:
+            return None
         return "Cannot remove task because it is currently running. Stop it first."
     conn.execute(
         "DELETE FROM runs WHERE project = ? AND task_id = ?",
@@ -614,7 +630,7 @@ def get_recent_runs(
     )
     order = _history_order_by(sort, sort_dir)
     return conn.execute(
-        f"SELECT * FROM runs {where_sql} ORDER BY {order} LIMIT ? OFFSET ?",
+        f"SELECT * FROM runs {where_sql} ORDER BY {order} LIMIT ? OFFSET ?",  # noqa: S608
         (*params, limit, offset),
     ).fetchall()
 
@@ -639,7 +655,7 @@ def count_recent_runs(
         status=status,
         worker=worker,
     )
-    row = conn.execute(f"SELECT COUNT(*) FROM runs {where_sql}", params).fetchone()
+    row = conn.execute(f"SELECT COUNT(*) FROM runs {where_sql}", params).fetchone()  # noqa: S608
     return int(row[0]) if row else 0
 
 
@@ -726,7 +742,7 @@ def get_last_runs_for_tasks(
         marks = ",".join("(?, ?)" for _ in chunk)
         params = [x for k in chunk for x in k]
         rows = conn.execute(
-            "SELECT r.* FROM runs r WHERE r.run_id IN ("
+            "SELECT r.* FROM runs r WHERE r.run_id IN ("  # noqa: S608
             f"SELECT MAX(run_id) FROM runs WHERE (project, task_id) IN (VALUES {marks}) "
             "GROUP BY project, task_id)",
             params,

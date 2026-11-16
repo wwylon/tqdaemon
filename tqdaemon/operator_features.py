@@ -9,7 +9,6 @@ the master lease.
 from __future__ import annotations
 
 import hashlib
-import hmac
 import json
 import logging
 import math
@@ -22,7 +21,7 @@ from typing import Any
 
 from tqdaemon._db_tasks import get_task
 from tqdaemon._time import parse_iso as _parse_iso
-from tqdaemon.auth import configured_token, token_required
+from tqdaemon.auth import configured_token, secure_equals, token_required
 from tqdaemon.cron import cron_matches
 from tqdaemon.dt_utils import iso_utc as _iso
 from tqdaemon.dt_utils import now_utc as _now
@@ -34,9 +33,10 @@ _TERMINAL = ("completed", "failed", "interrupted", "suspended", "stopped")
 ALERT_KINDS = ("run_duration", "failed_count", "queued_depth", "vram_pct")
 ALERT_ACTIONS = ("notify", "notify_stop")
 TOKEN_SCOPES = ("read", "write", "admin")
-_TOKEN_PREFIX = "tq_live_"
+_TOKEN_PREFIX = "tq_live_"  # noqa: S105 - public token prefix, not a secret
 
 _WRITE_PREFIXES = (
+    "/api/leases",
     "/api/stop/",
     "/api/retry/",
     "/api/force/",
@@ -46,8 +46,6 @@ _WRITE_PREFIXES = (
     "/api/project/freeze/",
     "/api/project/unfreeze/",
     "/api/project/stop-all/",
-    "/api/project/release/",
-    "/api/project/relocate/",
     "/api/project-set/",
     "/api/project-sets/",
 )
@@ -431,7 +429,7 @@ def update_alert(conn: sqlite3.Connection, rule_id: int, data: dict[str, Any]) -
     if fields:
         sets = ", ".join(f"{k} = ?" for k in fields)
         conn.execute(
-            f"UPDATE alert_rules SET {sets} WHERE id = ?",
+            f"UPDATE alert_rules SET {sets} WHERE id = ?",  # noqa: S608
             (*fields.values(), rule_id),
         )
         conn.commit()
@@ -754,7 +752,7 @@ def resolve_access_with_projects(
     if not token_required(cfg):
         return "admin", "legacy", None
     expected = configured_token(cfg)
-    if provided and hmac.compare_digest(provided, expected):
+    if provided and secure_equals(provided, expected):
         return "admin", "legacy", None
     if not provided:
         return None, None, None

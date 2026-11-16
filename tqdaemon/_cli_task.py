@@ -23,7 +23,7 @@ from tqdaemon._cli_helpers import (
 from tqdaemon._db_tasks import get_task, get_task_status
 from tqdaemon._time import parse_iso as _parse_iso
 from tqdaemon.jsonutil import json_list
-from tqdaemon.rows import has_col, row_get
+from tqdaemon.rows import has_col, row_get, row_resources
 
 
 def _list_fetch_rows(
@@ -61,7 +61,7 @@ def _list_fetch_rows(
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     # R1b: fetch extended fields including run-level data and attempt count
     rows = conn.execute(
-        f"SELECT tasks.project, tasks.task_id, tasks.priority, tasks.status, tasks.enabled,"
+        f"SELECT tasks.project, tasks.task_id, tasks.priority, tasks.status, tasks.enabled,"  # noqa: S608
         f" tasks.resources, tasks.last_error_code, tasks.block_reason, tasks.description,"
         f" tasks.tags, tasks.suite, tasks.grp, tasks.metadata, tasks.artifacts, tasks.depends_on,"
         f" tasks.depends_on_any, tasks.spawned_by,"
@@ -89,7 +89,7 @@ def _list_json(rows, occupancy: dict, home: Path, *, stat_artifacts: bool = Fals
     _projects = _load_projects(home) if stat_artifacts else {}
     out = []
     for r in rows:
-        res = json.loads(r["resources"] or "{}")
+        res = row_resources(r)
         artifact_paths = json_list(r["artifacts"]) if has_col(r, "artifacts") else []
         artifacts_info: list = []
         if stat_artifacts and artifact_paths:
@@ -161,7 +161,7 @@ def _list_json(rows, occupancy: dict, home: Path, *, stat_artifacts: bool = Fals
 
 def _list_row_display(r, occupancy: dict) -> tuple[str, str, str, str | None, str | None, str]:
     """Shared per-row display fields for verbose/compact human output."""
-    res = json.loads(r["resources"] or "{}")
+    res = row_resources(r)
     res_str = format_resources(res)
     err = row_get(r, "last_error_code")
     reason = row_get(r, "block_reason")
@@ -348,11 +348,12 @@ def cmd_describe(home: Path, key: str) -> int:
     return 0
 
 
-def cmd_stop(home: Path, key: str, *, force: bool = False, reason: str | None = None) -> int:
+def cmd_stop(home: Path, key: str, *, force: bool = False, reason: str | None = None, hard: bool = False) -> int:
     from tqdaemon._cli_helpers import EXIT_UNREACHABLE, master_mutation
 
     project, task_id = _split_key(key)
-    resp, mode = master_mutation(home, f"/api/stop/{project}/{task_id}", force=force, params={"reason": reason})
+    params = {"reason": reason, "hard": "1" if hard else None}
+    resp, mode = master_mutation(home, f"/api/stop/{project}/{task_id}", force=force, params=params)
     if mode == "unreachable":
         return EXIT_UNREACHABLE
     if mode == "master":
@@ -360,7 +361,8 @@ def cmd_stop(home: Path, key: str, *, force: bool = False, reason: str | None = 
             print(f"Error: {resp.get('error', resp)}")
             return 1
         eta = (resp.get("eta") or {}).get("text")
-        print(f"Stop requested for {key}." + (f" ETA at stop: {eta}." if eta else ""))
+        verb = "Hard stop (kill now)" if hard else "Stop"
+        print(f"{verb} requested for {key}." + (f" ETA at stop: {eta}." if eta else ""))
         return 0
     print("[tq] daemon not running; writing SQLite directly (offline repair)", file=sys.stderr)
     from tqdaemon.db import get_task, open_db, request_stop_with_control, set_run_stop_reason, set_task_status
@@ -389,14 +391,19 @@ def cmd_stop(home: Path, key: str, *, force: bool = False, reason: str | None = 
     else:
         op = os.environ.get("TQ_OPERATOR") or ""
         request_stop_with_control(
-            db, home, project, task_id, requested_by=f"{op + ' ' if op else ''}via cli offline (pid {os.getpid()})"
+            db,
+            home,
+            project,
+            task_id,
+            requested_by=f"{op + ' ' if op else ''}via cli offline (pid {os.getpid()})",
+            hard=hard,
         )
     db.close()
     print(f"Stop requested for {key}.")
     return 0
 
 
-def cmd_stop_project(home: Path, project: str) -> int:
+def cmd_stop_project(home: Path, project: str, *, hard: bool = False) -> int:
     from tqdaemon._cli_helpers import _daemon_running
     from tqdaemon.db import get_running_tasks, open_db, request_stop_with_control
     from tqdaemon.master_client import via_master
@@ -405,13 +412,14 @@ def cmd_stop_project(home: Path, project: str) -> int:
     rows = [r for r in get_running_tasks(db) if r["project"] == project]
     n = 0
     for row in rows:
-        resp = via_master(home, "POST", f"/api/stop/{row['project']}/{row['task_id']}")
+        suffix = "?hard=1" if hard else ""
+        resp = via_master(home, "POST", f"/api/stop/{row['project']}/{row['task_id']}{suffix}")
         if resp is None:
             if _daemon_running(home) is not None:
                 db.close()
                 print("[ERROR] daemon is running but did not answer; refusing a direct SQLite write.", file=sys.stderr)
                 return EXIT_UNREACHABLE
-            request_stop_with_control(db, home, row["project"], row["task_id"])
+            request_stop_with_control(db, home, row["project"], row["task_id"], hard=hard)
         elif not resp.get("ok"):
             print(f"Error stopping {row['project']}/{row['task_id']}: {resp.get('error', resp)}")
             continue
@@ -681,6 +689,7 @@ def cmd_retry(
     *,
     downstream: bool = False,
     enable_downstream: bool = False,
+    force: bool = False,
 ) -> int:
     from tqdaemon.db import (
         collect_downstream_task_ids,
@@ -763,7 +772,8 @@ def cmd_retry(
         body["downstream"] = True
     if enable_downstream:
         body["enable_downstream"] = True
-    resp = via_master(home, "POST", f"/api/tasks/{project}/{task_id}/retry", body=body or None)
+    retry_path = f"/api/tasks/{project}/{task_id}/retry" + ("?force=1" if force else "")
+    resp = via_master(home, "POST", retry_path, body=body or None)
     if resp is not None:
         ok = bool(resp.get("ok"))
         if downstream:
@@ -933,25 +943,29 @@ def cmd_locks(home: Path, *, as_json: bool = False) -> int:
     return 0
 
 
-def cmd_force(home: Path, key: str) -> int:
+def cmd_force(home: Path, key: str, *, start_now: bool = False) -> int:
     from tqdaemon._cli_helpers import EXIT_UNREACHABLE, master_mutation
 
     project, task_id = _split_key(key)
-    resp, mode = master_mutation(home, f"/api/force/{project}/{task_id}")
+    route = "start-now" if start_now else "force"
+    resp, mode = master_mutation(home, f"/api/{route}/{project}/{task_id}")
     if mode == "unreachable":
         return EXIT_UNREACHABLE
     if mode == "master":
         err = None if resp.get("ok") else (resp.get("error") or "failed")
     else:
-        from tqdaemon.db import force_task, open_db
+        from tqdaemon.db import force_task, open_db, start_now_task
 
         db = open_db(_db(home))
-        err = force_task(db, project, task_id)
+        err = (start_now_task if start_now else force_task)(db, project, task_id)
         db.close()
     if err:
         print(f"Error: {err}")
         return 1
-    print(f"{key} marked to force run on next scheduler tick.")
+    if start_now:
+        print(f"{key} queued first in line; starts when real RAM/VRAM allow (see `tq why {key}`).")
+    else:
+        print(f"{key} marked to force run on next scheduler tick.")
     return 0
 
 
@@ -1028,6 +1042,76 @@ def cmd_remove_project(home: Path, project: str, *, force: bool = False) -> int:
 
 def cmd_logs(home: Path, key: str, *, max_bytes: int | None = None) -> int:
     return cmd_logs_extended(home, key, max_bytes=max_bytes, grep=None, jsonl=False)
+
+
+def cmd_hint_show(home: Path, key: str) -> int:
+    """Explain a task's RAM hint: declared value, recent own peaks, ignored outlier, final source."""
+    from tqdaemon.db import get_task, open_db
+    from tqdaemon.estimate import explain_ram_hint
+    from tqdaemon.rows import row_resources
+
+    if "/" not in key:
+        print("Usage: tq hint show <project/task_id>")
+        return 1
+    project, task_id = key.split("/", 1)
+    db = _db(home)
+    if not db.exists():
+        print("No queue DB.")
+        return 1
+    conn = open_db(db)
+    try:
+        row = get_task(conn, project, task_id)
+        if row is None:
+            print(f"Unknown task {project}/{task_id}")
+            return 1
+        info = explain_ram_hint(conn, project, task_id, row_resources(row))
+    finally:
+        conn.close()
+    print(f"{project}/{task_id}: hint {info['ram_gib']:.2f} GiB (source: {info['source']})")
+    print(f"  declared ram_gib: {info['declared_ram_gib']:.2f}")
+    peaks = ", ".join(f"{p:.2f}" for p in info["own_peaks_gib"]) or "none"
+    print(f"  recent own peaks (newest first, GiB): {peaks}")
+    if info["dropped_outlier"] is not None:
+        print(f"  ignored outlier: {info['dropped_outlier']:.2f} GiB (>3x the next peak)")
+    print(f"  clear bad samples: tq hint reset {project}/{task_id} [--run N]")
+    return 0
+
+
+def cmd_hint_reset(home: Path, key: str, *, run_id: int | None = None) -> int:
+    """Clear recorded peak RAM/VRAM so a bad sample stops feeding admission hints.
+
+    Without ``run_id`` every finished run of the task is cleared; with it, only
+    that run. Peaks are set to NULL (excluded from estimates and anti-flap).
+    """
+    from tqdaemon.db import open_db
+
+    if "/" not in key:
+        print("Usage: tq hint reset <project/task_id> [--run N]")
+        return 1
+    project, task_id = key.split("/", 1)
+    db = _db(home)
+    if not db.exists():
+        print("No queue DB.")
+        return 1
+    conn = open_db(db)
+    try:
+        sql = (
+            "UPDATE runs SET peak_ram_gib = NULL, peak_vram_gib = NULL "
+            "WHERE project = ? AND task_id = ? AND status != 'running'"
+        )
+        params: list = [project, task_id]
+        if run_id is not None:
+            sql += " AND run_id = ?"
+            params.append(run_id)
+        n = conn.execute(sql, params).rowcount
+        conn.commit()
+    finally:
+        conn.close()
+    if n == 0:
+        print(f"No finished runs to reset for {project}/{task_id}.")
+        return 1
+    print(f"Cleared peak RAM/VRAM on {n} run(s) of {project}/{task_id}.")
+    return 0
 
 
 def cmd_diagnose(home: Path, key: str) -> int:
@@ -1602,7 +1686,7 @@ def cmd_watch(home: Path, *, interval: float = 2.0) -> int:
         if not running:
             lines.append("  (no tasks running)")
         for row in running:
-            res = json.loads(row["resources"] or "{}")
+            res = row_resources(row)
             res_str = f"cpu={res.get('cpu_cores', 1)} ram={res.get('ram_gib', 0):.0f}G"
             desc = (row["description"] or "")[:50]
             eta = _eta_str(row["predicted_duration_sec"], row["started_at"])
@@ -1645,7 +1729,7 @@ def cmd_watch(home: Path, *, interval: float = 2.0) -> int:
             tbl.add_column("Resources", width=22)
             tbl.add_column("Description")
             for row in running:
-                res = json.loads(row["resources"] or "{}")
+                res = row_resources(row)
                 res_str = f"cpu={res.get('cpu_cores', 1)} ram={res.get('ram_gib', 0):.0f}G"
                 eta = _eta_str(row["predicted_duration_sec"], row["started_at"])
                 desc = ((row["description"] or "")[:58] + eta) if eta else (row["description"] or "")[:60]
@@ -1656,7 +1740,7 @@ def cmd_watch(home: Path, *, interval: float = 2.0) -> int:
                 "ORDER BY priority DESC, enqueued_at ASC LIMIT 8"
             ).fetchall()
             for row in queued_rows:
-                res = json.loads(row["resources"] or "{}")
+                res = row_resources(row)
                 res_str = f"cpu={res.get('cpu_cores', 1)} ram={res.get('ram_gib', 0):.0f}G"
                 tbl.add_row(
                     "[yellow]queued[/yellow]",

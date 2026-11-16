@@ -18,6 +18,9 @@
   border-bottom:2px solid #dc2626;">
   <span data-i18n="header.offlineBanner">⚠ Daemon offline — reconnecting…</span>
 </div>
+<div id="lifecycle-banner" role="status" aria-live="polite" style="display:none;position:fixed;top:0;inset-inline:0;z-index:9998;
+  background:#78350f;color:#fde68a;padding:8px 16px;font-size:13px;font-weight:600;text-align:center;
+  border-bottom:2px solid #d97706;"></div>
 <div id="tq-a11y-live" class="sr-only" aria-live="polite" aria-atomic="true"></div>
 
 <div id="app-frame">
@@ -232,6 +235,9 @@
     <span class="spacer" style="flex:1"></span>
     <button id="proj-pause-btn" class="cfg-btn" data-click='[["toggleProjectPause"]]' style="display:none;font-size:11px" data-i18n="btn.pauseProject" data-i18n-title="btn.pauseProjectTitle" title="Queued tasks wait; running tasks continue">⏸ Pause project</button>
     <button id="proj-freeze-btn" class="cfg-btn" data-click='[["toggleProjectFreeze"]]' style="display:none;font-size:11px" title="Block new starts for this project" data-i18n="btn.freeze" data-i18n-title="btn.freezeTitle">❄ Block project</button>
+    <button id="proj-limits-btn" class="cfg-btn" data-click='[["tqOpenProjectLimits"]]' style="display:none;font-size:11px" data-i18n="btn.projectLimits" title="Caps for this project (Settings → Limits)" data-i18n-title="btn.projectLimitsTitle">⚖ Limits…</button>
+    <button id="proj-archive-btn" class="cfg-btn" data-click='[["tqArchiveProject"]]' style="display:none;font-size:11px" data-i18n="btn.projectArchive" title="Archive old finished tasks of this project" data-i18n-title="btn.projectArchiveTitle">🗄 Archive…</button>
+    <button id="proj-rename-btn" class="cfg-btn" data-click='[["tqRenameProject"]]' style="display:none;font-size:11px" data-i18n="btn.projectRename" title="Rename this project id (history, limits and references move with it)" data-i18n-title="btn.projectRenameTitle">✏ Rename…</button>
     <button id="proj-stopall-btn" class="cfg-btn" data-click='[["stopAllProject"]]' style="display:none;font-size:11px;color:var(--fail)" title="Stop all running tasks in project" data-i18n="btn.stopAll">⏹ Stop All</button>
   </div>
   <div class="filter-bar" id="queue-set-bar" style="display:none;flex-wrap:wrap;gap:4px;align-items:center"></div>
@@ -559,6 +565,7 @@
     </div>
     <div id="tl-empty" class="empty" hidden data-i18n="tl.empty">No queued or scheduled work in this window.</div>
     <div id="tl-scroll" class="tl-scroll"></div>
+    <div id="tl-notshown"></div>
   </div>
 </div>
 
@@ -744,33 +751,15 @@
   </div>
 </div>
 
-<!-- Config modal -->
+<!-- Settings dialog: tabs; every change is staged and applied by Save (components/cfgmodal.js) -->
 <div class="modal-bg" id="cfg-modal" data-click='[["closeCfg"]]' data-click-self>
-  <div class="modal">
-    <h2 data-i18n="config.title">Resource limits</h2>
-    <div class="cfg-row"><label data-i18n="config.cpuLimit">CPU limit %</label><input id="cfg-cpu" type="number" min="1" max="100"></div>
-    <div class="cfg-row"><label data-i18n="config.gpuLimit">GPU limit %</label><input id="cfg-gpu" type="number" min="0" max="100"></div>
-    <div class="cfg-row"><label data-i18n="config.ramLimit">RAM limit % (of total)</label><input id="cfg-ram" type="number" min="10" max="100"></div>
-    <div class="cfg-row"><label data-i18n="config.gracefulStop">Graceful stop timeout (s)</label><input id="cfg-stop" type="number" min="5" max="300"></div>
-    <div class="cfg-row"><label data-i18n="config.frozenThreshold">Frozen detection threshold (s)</label><input id="cfg-frozen" type="number" min="60" max="3600"></div>
-    <div class="cfg-row"><label data-i18n="config.maxRunningTasks">Max running tasks — global cap (0 = unlimited)</label><input id="cfg-max-tasks" type="number" min="0" max="256"></div>
-    <div class="cfg-row">
-      <label title="What to do when running tasks exceed max_running_tasks after a limit decrease" data-i18n-title="config.whenOverLimitTitle" data-i18n="config.whenOverLimit">When running &gt; limit</label>
-      <select id="cfg-limit-policy" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:3px 8px;font-size:13px">
-        <option value="ignore" data-i18n="config.policyIgnore">ignore (keep running, block new starts)</option>
-        <option value="evict" data-i18n="config.policyEvict">evict lowest-priority task per tick</option>
-      </select>
-    </div>
-    <div class="cfg-row"><label data-i18n="config.maxCpuCores">Max CPU cores total (0 = unlimited)</label><input id="cfg-max-cpu" type="number" min="0" max="1024"></div>
-    <div class="cfg-row"><label data-i18n="config.maxRamGib">Max RAM GiB total (0 = unlimited)</label><input id="cfg-max-ram" type="number" min="0" max="10000" step="0.5"></div>
-    <div class="cfg-row"><label data-i18n="config.gpuVramCap">GPU VRAM cap GiB (0 = use % limit)</label><input id="cfg-vram-cap" type="number" min="0" max="1000" step="0.5"></div>
-    <h3 style="margin:16px 0 8px;font-size:14px" data-i18n="settings.projectsSets">Projects &amp; sets</h3>
-    <p style="font-size:12px;color:var(--muted);margin:0 0 8px" data-i18n="settings.setDefaultsNote">Set defaults are inherited by members; project values override (0 = inherit). Distinct from task YAML groups.</p>
-    <div id="cfg-project-limits"></div>
-    <h3 style="margin:16px 0 8px;font-size:14px" data-i18n="settings.setMembership">Set membership</h3>
-    <p style="font-size:12px;color:var(--muted);margin:0 0 8px" data-i18n="settings.assignPaths">Assign slash paths (e.g. games/card) or rename a set prefix.</p>
-    <div id="cfg-project-sets"></div>
+  <div class="modal cfg-settings-modal">
+    <h2 data-i18n="settings.title">Settings</h2>
+    <div class="cfg-tabs" id="cfg-tabs" role="tablist"></div>
+    <div class="cfg-body" id="cfg-body"></div>
     <div class="modal-footer">
+      <span class="cfg-dirty" id="cfg-dirty"></span>
+      <button class="btn-cancel" id="cfg-discard" data-click='[["tqCfgDiscard"]]' data-i18n="settings.discard">Discard</button>
       <button class="btn-cancel" data-click='[["closeCfg"]]' data-i18n="btn.cancel">Cancel</button>
       <button class="btn-primary" data-click='[["saveCfg"]]' data-i18n="btn.save">Save</button>
     </div>
@@ -805,8 +794,10 @@
     <div id="tq-drawer-body" class="tq-drawer-body"></div>
     <footer class="tq-drawer-foot">
       <button type="button" class="cfg-btn tq-act-retry" id="tq-drawer-retry" data-click='[["tqDrawerAction","retry"]]' data-i18n="drawer.retry">Retry</button>
+      <button type="button" class="cfg-btn tq-act-start" id="tq-drawer-startnow" data-click='[["tqDrawerAction","startnow"]]' data-i18n="drawer.startNow" data-i18n-title="help.startNowBody" title="Start now puts the task first in line and ignores RAM/VRAM held for other waiting tasks.">Start now</button>
       <button type="button" class="cfg-btn tq-act-force" id="tq-drawer-force" data-click='[["tqDrawerAction","force"]]' data-i18n="drawer.force">Force run</button>
       <button type="button" class="cfg-btn tq-act-stop" id="tq-drawer-stop" data-click='[["tqDrawerAction","stop"]]' data-i18n="drawer.stop">Stop</button>
+      <button type="button" class="cfg-btn tq-act-kill" id="tq-drawer-kill" data-click='[["tqDrawerAction","kill"]]' data-i18n="drawer.kill" data-i18n-title="help.killBody" title="Kill the process tree now — no checkpoint, progress since the last checkpoint is lost.">Kill now</button>
       <button type="button" class="cfg-btn" id="tq-drawer-hold" data-click='[["tqDrawerAction","hold"]]' data-i18n="btn.hold">Hold</button>
       <button type="button" class="cfg-btn" id="tq-drawer-unhold" data-click='[["tqDrawerAction","unhold"]]' data-i18n="btn.unhold">Resume hold</button>
       <button type="button" class="cfg-btn" id="tq-drawer-enable" data-click='[["tqDrawerToggleEnabled"]]'>Disable</button>

@@ -34,7 +34,7 @@ def _read_git_sha() -> str:
 
         return (
             _sp.check_output(
-                ["git", "rev-parse", "--short", "HEAD"],
+                ["git", "rev-parse", "--short", "HEAD"],  # noqa: S607
                 stderr=_sp.DEVNULL,
                 cwd=str(Path(__file__).resolve().parent.parent),
                 **hide_console_check_output_kwargs(),
@@ -319,7 +319,7 @@ def relativize_requires_paths(paths: list[Any], project_root: Path) -> list[str]
 def _redact_config(cfg: dict[str, Any]) -> dict[str, Any]:
     out = dict(cfg)
     if out.get("auth_token"):
-        out["auth_token"] = "***"
+        out["auth_token"] = "***"  # noqa: S105 - redaction marker, not a password
     if out.get("notify_url"):
         out["notify_url"] = _redact_url(str(out["notify_url"]))
     return out
@@ -575,9 +575,9 @@ def _get_queue_response(
     )
     # Count does not need last-run columns unless filtering by worker (lr.worker_id).
     if worker:
-        count_sql = f"SELECT COUNT(*) FROM tasks t {_lr_join} {where_sql}"
+        count_sql = f"SELECT COUNT(*) FROM tasks t {_lr_join} {where_sql}"  # noqa: S608
     else:
-        count_sql = f"SELECT COUNT(*) FROM tasks t {where_sql}"
+        count_sql = f"SELECT COUNT(*) FROM tasks t {where_sql}"  # noqa: S608
     total = conn.execute(count_sql, params).fetchone()[0]
 
     use_deps_sort = sort == "deps"
@@ -603,7 +603,7 @@ def _get_queue_response(
             forecast_map = {}
 
     task_cols = ", ".join(f"t.{c}" for c in _QUEUE_SLIM_COLUMNS) if slim else "t.*"
-    data_sql = f"SELECT {task_cols}, {_lr_cols} FROM tasks t {_lr_join} {where_sql} "
+    data_sql = f"SELECT {task_cols}, {_lr_cols} FROM tasks t {_lr_join} {where_sql} "  # noqa: S608
     if use_deps_sort:
         # Sort on slim columns (no last-run join, no t.*), then load full rows for the page only.
         # The worker filter references lr.*, so that case keeps the full-row path.
@@ -611,7 +611,7 @@ def _get_queue_response(
         if slim:
             rows = list(
                 conn.execute(
-                    "SELECT t.project, t.task_id, t.status, t.priority, t.enqueued_at, "
+                    "SELECT t.project, t.task_id, t.status, t.priority, t.enqueued_at, "  # noqa: S608
                     f"t.depends_on, t.depends_on_any FROM tasks t {where_sql}",
                     params,
                 ).fetchall()
@@ -636,7 +636,7 @@ def _get_queue_response(
         if slim and rows:
             keys = [(r["project"], r["task_id"]) for r in rows]
             full = conn.execute(
-                f"SELECT {task_cols}, {_lr_cols} "
+                f"SELECT {task_cols}, {_lr_cols} "  # noqa: S608
                 f"FROM tasks t {_lr_join} "
                 "WHERE " + " OR ".join("(t.project = ? AND t.task_id = ?)" for _ in keys),
                 [v for k in keys for v in k],
@@ -662,7 +662,7 @@ def _get_queue_response(
         order = f"{_queue_order_by(sort, sort_dir)}, t.rowid"
         inner_join = _lr_join if (worker or sort in ("started_at", "finished_at")) else ""
         page_sql = (
-            f"SELECT {task_cols}, {_lr_cols} FROM ("
+            f"SELECT {task_cols}, {_lr_cols} FROM ("  # noqa: S608
             f"SELECT t.rowid AS rid FROM tasks t {inner_join} {where_sql} ORDER BY {order} LIMIT ? OFFSET ?"
             f") k JOIN tasks t ON t.rowid = k.rid {_lr_join} ORDER BY {order}"
         )
@@ -1114,7 +1114,7 @@ def _get_deps_response(
     if scope_project and not project:
         # Cross-project ids in the response (focus inferred project).
         rows = conn.execute(
-            "SELECT task_id, status, description, depends_on, depends_on_any, spawned_by, "
+            "SELECT task_id, status, description, depends_on, depends_on_any, spawned_by, "  # noqa: S608
             "project, block_reason, last_error_code, priority, transfer, yaml_num, "
             "tags, grp, suite "
             f"FROM tasks {where_sql} ORDER BY priority DESC, task_id{limit_sql}",
@@ -1124,7 +1124,7 @@ def _get_deps_response(
         project = None
     elif scope_project:
         rows = conn.execute(
-            "SELECT task_id, status, description, depends_on, depends_on_any, spawned_by, "
+            "SELECT task_id, status, description, depends_on, depends_on_any, spawned_by, "  # noqa: S608
             "block_reason, last_error_code, priority, transfer, yaml_num, "
             "tags, grp, suite "
             f"FROM tasks {where_sql} ORDER BY priority DESC, task_id{limit_sql}",
@@ -1132,7 +1132,7 @@ def _get_deps_response(
         ).fetchall()
     else:
         rows = conn.execute(
-            "SELECT t.task_id, t.status, t.description, t.depends_on, t.depends_on_any, "
+            "SELECT t.task_id, t.status, t.description, t.depends_on, t.depends_on_any, "  # noqa: S608
             "t.spawned_by, t.project, "
             "t.block_reason, t.last_error_code, t.priority, t.transfer, t.yaml_num, "
             "t.tags, t.grp, t.suite "

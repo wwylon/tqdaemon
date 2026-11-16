@@ -93,7 +93,7 @@ def get_set_limits(conn: sqlite3.Connection, path: str) -> dict[str, float]:
     out = empty_limits()
     keys = [_set_limit_key(path, f) for f in _PROJECT_LIMIT_FIELDS]
     rows = conn.execute(
-        f"SELECT key, value FROM config WHERE key IN ({','.join('?' * len(keys))})",
+        f"SELECT key, value FROM config WHERE key IN ({','.join('?' * len(keys))})",  # noqa: S608
         keys,
     ).fetchall()
     prefix = f"set_limit_{encode_set_path(path)}_"

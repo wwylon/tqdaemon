@@ -13,6 +13,8 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+from tqdaemon.db import open_ro
+
 WAL_WARN_BYTES = 512 * 1024 * 1024
 DISK_WARN_BYTES = 2 * 1024**3
 DISK_FAIL_BYTES = 200 * 1024**2
@@ -24,7 +26,7 @@ def _check(name: str, level: str, detail: str) -> dict[str, str]:
 
 def _check_legacy_limits(db: Path, checks: list[dict[str, str]]) -> None:
     """Advise on ``max_concurrent_tasks`` (Wave 4.7): it overlaps ``max_running_tasks``."""
-    conn = sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True, timeout=5.0)
+    conn = open_ro(db, timeout=5.0)
     try:
         row = conn.execute("SELECT value FROM config WHERE key = 'max_concurrent_tasks'").fetchone()
     except sqlite3.Error:
@@ -73,7 +75,7 @@ def run_checks(home: Path) -> dict[str, Any]:
         checks.append(_check("database", "warn", f"no database at {db}"))
     else:
         try:
-            conn = sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True, timeout=5.0)
+            conn = open_ro(db, timeout=5.0)
             try:
                 res = conn.execute("PRAGMA quick_check").fetchone()[0]
             finally:
@@ -215,13 +217,13 @@ def propose_remediations(home: Path, checks: list[dict[str, str]] | None = None)
     db = db_path(home)
     if db.is_file():
         try:
-            conn = sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True, timeout=5.0)
+            conn = open_ro(db, timeout=5.0)
             conn.row_factory = sqlite3.Row
             try:
                 statuses = tuple(sorted(_ENABLED_NEEDS_RETRY_STATUSES))
                 placeholders = ",".join("?" * len(statuses))
                 rows = conn.execute(
-                    f"SELECT project, COUNT(*) AS n FROM tasks "
+                    f"SELECT project, COUNT(*) AS n FROM tasks "  # noqa: S608
                     f"WHERE enabled = 1 AND status IN ({placeholders}) "
                     f"GROUP BY project ORDER BY n DESC LIMIT 12",
                     statuses,

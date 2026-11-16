@@ -83,7 +83,7 @@ def _ui_url(home: Path) -> str:
 
     host = "127.0.0.1"
     cfg_host = str(read_config(home).get("bind_host") or "").strip()
-    if cfg_host and cfg_host != "0.0.0.0":
+    if cfg_host and cfg_host != "0.0.0.0":  # noqa: S104 - comparing against the wildcard bind address, not binding
         host = cfg_host
     return f"http://{host}:{_web_port(home)}"
 
@@ -106,7 +106,9 @@ def _split_key(key: str) -> tuple[str, str]:
     project, sep, task_id = key.partition("/")
     if not sep or not project or not task_id:
         raise SystemExit(f"Expected 'project/task_id', got: {key!r}")
-    return project, task_id
+    from tqdaemon.project_rename import resolve_project_in_home
+
+    return resolve_project_in_home(None, project), task_id  # old id after `tq project rename` still works
 
 
 # Statuses where enabled=true does not admit a new run (need tq retry).
@@ -147,11 +149,11 @@ def warn_enabled_terminal_summary(
         params.append(project)
     where = " AND ".join(clauses)
     rows = conn.execute(
-        f"SELECT project, task_id, status FROM tasks WHERE {where} ORDER BY project, task_id LIMIT ?",
+        f"SELECT project, task_id, status FROM tasks WHERE {where} ORDER BY project, task_id LIMIT ?",  # noqa: S608
         (*params, limit),
     ).fetchall()
     total = conn.execute(
-        f"SELECT COUNT(*) AS n FROM tasks WHERE {where}",
+        f"SELECT COUNT(*) AS n FROM tasks WHERE {where}",  # noqa: S608
         params,
     ).fetchone()["n"]
     if not total:

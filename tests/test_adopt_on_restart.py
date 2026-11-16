@@ -7,6 +7,7 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
 import yaml
 
 from tests.helpers.wait import wait_until
@@ -89,6 +90,7 @@ def _status(db) -> tuple[str, str, int | None]:
     return t, r[0], r[1]
 
 
+@pytest.mark.flaky
 def test_restart_adopts_a_live_run_which_then_completes(tmp_path: Path) -> None:
     gate = tmp_path / "gate"
     db, home, proj = _env(

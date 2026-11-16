@@ -8,6 +8,7 @@ from typing import Any
 
 from tqdaemon._db_tasks import bulk_prior_run_seconds, get_task
 from tqdaemon._time import parse_iso as _parse_iso
+from tqdaemon.daemon_state import lifecycle_info
 from tqdaemon.rows import has_col, row_get
 from tqdaemon.web.responses import format_server_timing
 
@@ -115,7 +116,7 @@ class ReadRoutes:
         if cached and now - cached[0] < 5.0:
             version = cached[1]
         else:
-            h = hashlib.sha1()
+            h = hashlib.sha1(usedforsecurity=False)
             for f in sorted(
                 p for p in _STATIC.rglob("*") if p.is_file() and p.suffix in (".js", ".css", ".html", ".json")
             ):
@@ -281,7 +282,7 @@ ul{{padding-left:1.35rem;margin:0.5rem 0}} li{{margin:0.2rem 0}}
             placeholders = ",".join("(?,?)" for _ in chunk)
             params = [v for pair in chunk for v in pair]
             rows = conn.execute(
-                f"SELECT r.* FROM runs r "
+                f"SELECT r.* FROM runs r "  # noqa: S608
                 f"INNER JOIN ("
                 f"  SELECT project, task_id, MAX(run_id) AS max_run_id "
                 f"  FROM runs WHERE (project, task_id) IN ({placeholders}) "
@@ -299,7 +300,7 @@ ul{{padding-left:1.35rem;margin:0.5rem 0}} li{{margin:0.2rem 0}}
             chunk = worker_ids[i : i + _SQL_IN_CHUNK]
             ph2 = ",".join("?" for _ in chunk)
             for wr in conn.execute(
-                f"SELECT worker_id, last_seen FROM workers WHERE worker_id IN ({ph2})",
+                f"SELECT worker_id, last_seen FROM workers WHERE worker_id IN ({ph2})",  # noqa: S608
                 chunk,
             ).fetchall():
                 worker_seen[wr["worker_id"]] = wr["last_seen"]
@@ -412,6 +413,7 @@ ul{{padding-left:1.35rem;margin:0.5rem 0}} li{{margin:0.2rem 0}}
             "project_states": project_states(self._rconn()),
             "alert_firing": count_system_alert_firing(self._rconn()),
             "health": health,
+            "lifecycle": lifecycle_info(cfg),
         }
 
     def _get_health(self) -> dict[str, Any]:
@@ -1047,6 +1049,17 @@ ul{{padding-left:1.35rem;margin:0.5rem 0}} li{{margin:0.2rem 0}}
             },
         }
 
+    def _get_config_schema(self) -> dict[str, Any]:
+        from tqdaemon.config_schema import config_schema
+
+        return config_schema()
+
+    def _get_limit_tree(self) -> dict[str, Any]:
+        """One limits tree (all > sets > projects) with own / effective caps and live usage."""
+        from tqdaemon.limit_tree import build_limit_tree
+
+        return build_limit_tree(self._rconn(), self._projects_ref())
+
     def _get_project_limits_enriched(self) -> dict[str, Any]:
         """GET /api/project-limits — overrides + effective + set defaults."""
         from tqdaemon.project_limits import build_limits_api_payload
@@ -1301,7 +1314,7 @@ ul{{padding-left:1.35rem;margin:0.5rem 0}} li{{margin:0.2rem 0}}
                 rows = (
                     self._rconn()
                     .execute(
-                        f"SELECT {cols} FROM resource_history WHERE run_id=? AND ts>? ORDER BY ts LIMIT 2000",
+                        f"SELECT {cols} FROM resource_history WHERE run_id=? AND ts>? ORDER BY ts LIMIT 2000",  # noqa: S608
                         (run_id, since),
                     )
                     .fetchall()
@@ -1310,7 +1323,7 @@ ul{{padding-left:1.35rem;margin:0.5rem 0}} li{{margin:0.2rem 0}}
                 rows = (
                     self._rconn()
                     .execute(
-                        f"SELECT {cols} FROM resource_history WHERE run_id=? ORDER BY ts LIMIT 2000",
+                        f"SELECT {cols} FROM resource_history WHERE run_id=? ORDER BY ts LIMIT 2000",  # noqa: S608
                         (run_id,),
                     )
                     .fetchall()

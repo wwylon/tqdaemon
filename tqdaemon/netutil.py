@@ -67,6 +67,23 @@ def _open(req: urllib.request.Request, *, timeout: float, allow_remote: bool):
     return loopback_opener(allow_remote=allow_remote).open(req, timeout=timeout)
 
 
+def probe_post_json(url: str, payload: dict, *, allow_remote: bool, timeout: float) -> tuple[int, bytes]:
+    """POST a JSON body under the same SSRF policy as ``probe_get`` (used for Ollama unload)."""
+    import json
+
+    why = check_probe_url(url, allow_remote=allow_remote)
+    if why:
+        raise ProbeBlocked(why)
+    req = urllib.request.Request(  # noqa: S310
+        url, data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json"}, method="POST"
+    )
+    try:
+        with _open(req, timeout=timeout, allow_remote=allow_remote) as resp:
+            return int(getattr(resp, "status", 200) or 200), resp.read()
+    except urllib.error.HTTPError as exc:
+        return int(exc.code), b""
+
+
 def probe_get(url: str, *, allow_remote: bool, timeout: float) -> tuple[int, bytes]:
     """GET a health / VRAM probe URL under the SSRF policy (F-229).
 
@@ -77,7 +94,7 @@ def probe_get(url: str, *, allow_remote: bool, timeout: float) -> tuple[int, byt
     why = check_probe_url(url, allow_remote=allow_remote)
     if why:
         raise ProbeBlocked(why)
-    req = urllib.request.Request(url, method="GET")
+    req = urllib.request.Request(url, method="GET")  # noqa: S310
     try:
         with _open(req, timeout=timeout, allow_remote=allow_remote) as resp:
             return int(getattr(resp, "status", 200) or 200), resp.read()

@@ -793,7 +793,7 @@ class TransferRoutes:
             fwd_url = f"{_up.scheme}://{netloc}{fwd_path}"
             if _up.query:
                 fwd_url += "?" + _up.query
-            fwd_req = _ureq.Request(fwd_url, data=body, method=method)
+            fwd_req = _ureq.Request(fwd_url, data=body, method=method)  # noqa: S310
             if _up.hostname:
                 host_hdr = _up.hostname if not _up.port else f"{_up.hostname}:{_up.port}"
                 fwd_req.add_header("Host", host_hdr)

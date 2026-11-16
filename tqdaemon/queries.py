@@ -29,7 +29,7 @@ def _fetch_status_map(
         placeholders = ", ".join("(?, ?)" for _ in chunk)
         flat = [v for pair in chunk for v in pair]
         for r in conn.execute(
-            f"WITH _need(p, t) AS (VALUES {placeholders}) "
+            f"WITH _need(p, t) AS (VALUES {placeholders}) "  # noqa: S608
             "SELECT tasks.project, tasks.task_id, tasks.status "
             "FROM tasks JOIN _need ON tasks.project = _need.p AND tasks.task_id = _need.t",
             flat,
@@ -57,7 +57,7 @@ def find_broken_deps(
     table scan at no extra SQL cost.
     """
     extra = ", status, enabled, updated_at" if collect_disabled else ""
-    sql = f"SELECT project, task_id, depends_on, depends_on_any{extra} FROM tasks"
+    sql = f"SELECT project, task_id, depends_on, depends_on_any{extra} FROM tasks"  # noqa: S608
     params: list[Any] = []
     where: list[str] = []
     if project:
@@ -155,7 +155,7 @@ def tasks_cached(conn: sqlite3.Connection, name: str, project: str | None, compu
     import time
 
     row = conn.execute(
-        "SELECT COUNT(*), MAX(updated_at), "
+        "SELECT COUNT(*), MAX(updated_at), "  # noqa: S608
         "(SELECT file FROM pragma_database_list WHERE name = 'main') FROM tasks"
         + (" WHERE project = ?" if project else ""),
         (project,) if project else (),
@@ -180,7 +180,7 @@ def find_broken_deps_cached(conn: sqlite3.Connection, *, project: str | None = N
     import time
 
     row = conn.execute(
-        "SELECT COUNT(*), MAX(updated_at), "
+        "SELECT COUNT(*), MAX(updated_at), "  # noqa: S608
         "(SELECT file FROM pragma_database_list WHERE name = 'main') FROM tasks"
         + (" WHERE project = ?" if project else ""),
         (project,) if project else (),
@@ -317,7 +317,7 @@ def cancel_negative_dependents(
             ph = ",".join("(?, ?)" for _ in chunk)
             flat = [v for pair in chunk for v in pair]
             for dep in conn.execute(
-                f"SELECT project, task_id, status, last_error_code FROM tasks WHERE (project, task_id) IN ({ph})",
+                f"SELECT project, task_id, status, last_error_code FROM tasks WHERE (project, task_id) IN ({ph})",  # noqa: S608
                 flat,
             ):
                 peer_map[(str(dep["project"]), str(dep["task_id"]))] = (

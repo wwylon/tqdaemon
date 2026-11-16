@@ -6,6 +6,11 @@ import hmac
 from typing import Any
 
 
+def secure_equals(a: str, b: str) -> bool:
+    """Constant-time string compare that never raises (non-ASCII ``str`` breaks compare_digest)."""
+    return hmac.compare_digest(str(a).encode("utf-8"), str(b).encode("utf-8"))
+
+
 def token_required(cfg: dict[str, Any]) -> bool:
     tok = cfg.get("auth_token") or ""
     return bool(str(tok).strip())
@@ -51,7 +56,24 @@ def check_token(cfg: dict[str, Any], provided: str | None) -> bool:
         return True
     if not provided:
         return False
-    return hmac.compare_digest(provided, expected)
+    return secure_equals(provided, expected)
+
+
+def sign_upgrade(token: str, version: str, sha256: str) -> str:
+    """S6: HMAC over (version, wheel sha256) keyed by the shared auth token.
+
+    A worker only auto-upgrades to a wheel the master vouches for with the token, so someone who can
+    answer ``GET /api/worker/version`` on the wire (plain HTTP LAN) but does not hold the token cannot
+    push code to workers.
+    """
+    msg = f"tqdaemon-upgrade:{version}:{sha256}".encode()
+    return hmac.new(token.encode("utf-8"), msg, "sha256").hexdigest()
+
+
+def verify_upgrade(token: str, version: str, sha256: str, sig: object) -> bool:
+    if not token or not isinstance(sig, str) or not sig:
+        return False
+    return secure_equals(sign_upgrade(token, version, sha256), sig)
 
 
 def finalize_token_matches(stored: Any, given: Any) -> bool:

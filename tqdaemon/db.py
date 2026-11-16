@@ -46,6 +46,13 @@ def open_write_conn(db_path: Path, timeout: float = 10.0) -> sqlite3.Connection:
     return conn
 
 
+def open_ro(db_path: Path | str, timeout: float = 5.0) -> sqlite3.Connection:
+    """Read-only connection (``mode=ro`` URI, ``Row`` factory) for diagnostics that must never write."""
+    conn = sqlite3.connect(f"file:{Path(db_path).as_posix()}?mode=ro", uri=True, timeout=timeout)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
 def record_resource_sample(
     conn: sqlite3.Connection,
     run_id: int,
@@ -353,7 +360,7 @@ def get_project_limits(conn: sqlite3.Connection, project: str) -> dict[str, floa
     out: dict[str, float] = {f: 0.0 for f in _PROJECT_LIMIT_FIELDS}
     keys = [_limit_key(project, f) for f in _PROJECT_LIMIT_FIELDS]
     rows = conn.execute(
-        f"SELECT key, value FROM config WHERE key IN ({','.join('?' * len(keys))})",
+        f"SELECT key, value FROM config WHERE key IN ({','.join('?' * len(keys))})",  # noqa: S608
         keys,
     ).fetchall()
     prefix = f"project_limit_{project}_"
@@ -489,6 +496,7 @@ from tqdaemon._db_runs import (  # noqa: F401
     renew_run_lease_for_worker,
     set_run_pid,
     set_run_stop_reason,
+    start_now_task,
     update_run_metrics,
     update_run_progress,
     worker_health,

@@ -162,7 +162,7 @@ def get_sys_info() -> dict:
     cuda_version = ""
     try:
         _result = subprocess.run(
-            [
+            [  # noqa: S607
                 "nvidia-smi",
                 "--query-gpu=name,memory.total,memory.free,compute_cap,driver_version,cuda_version",
                 "--format=csv,noheader,nounits",
@@ -235,7 +235,7 @@ def get_live_load() -> dict:
     # B4: per-device free VRAM (best-effort nvidia-smi live read).
     try:
         _r = subprocess.run(
-            ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+            ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],  # noqa: S607
             capture_output=True,
             text=True,
             timeout=5,
@@ -267,6 +267,18 @@ def get_live_load() -> dict:
     return result
 
 
+def safe_upgrade_url(master_url: str, upgrade_url: str) -> str | None:
+    """S8: the wheel must come from the master itself.
+
+    Plain concatenation let ``upgrade_url="@evil.example/x"`` turn ``http://master`` into
+    ``http://master@evil.example/x`` (the worker's auth headers then go to evil.example).
+    """
+    u = (upgrade_url or "").strip()
+    if not u.startswith("/") or u.startswith("//") or "\\" in u or "@" in u.split("?")[0] or "://" in u:
+        return None
+    return master_url.rstrip("/") + u
+
+
 def _check_worker_upgrade(
     master_url: str,
     home: Path,
@@ -292,6 +304,16 @@ def _check_worker_upgrade(
 
     master_ver = info.get("version", "")
     master_sha = info.get("sha256", "")
+    # S6: with a shared token, only upgrade to a wheel the master signed with it.
+    from tqdaemon.worker_http import auth_token as _worker_token
+
+    _tok = _worker_token()
+    if _tok:
+        from tqdaemon.auth import verify_upgrade
+
+        if not verify_upgrade(_tok, str(master_ver), str(master_sha), info.get("sig")):
+            print("[worker] Upgrade refused: master did not sign the wheel with the shared token", file=sys.stderr)
+            return False
     try:
         mv = tuple(int(x) for x in master_ver.split(".")[:3])
         wv = tuple(int(x) for x in _WORKER_VERSION.split(".")[:3])
@@ -312,15 +334,18 @@ def _check_worker_upgrade(
     print(f"[worker] Auto-upgrade: {_WORKER_VERSION} → {master_ver}", file=sys.stderr)
 
     # Download wheel streaming to disk (avoid holding 10–50 MB in RAM).
-    wheel_url = master_url.rstrip("/") + info["upgrade_url"]
-    req = urllib.request.Request(wheel_url, headers=_auth_headers(), method="GET")
+    wheel_url = safe_upgrade_url(master_url, str(info["upgrade_url"]))
+    if wheel_url is None:
+        print("[worker] Upgrade refused: upgrade_url is not a plain path on the master", file=sys.stderr)
+        return False
+    req = urllib.request.Request(wheel_url, headers=_auth_headers(), method="GET")  # noqa: S310
     wheels_dir = home / "wheels"
     wheels_dir.mkdir(parents=True, exist_ok=True)
     prev_wheel = wheels_dir / "worker_prev.whl"
     new_wheel = wheels_dir / "worker_new.whl"
     try:
         h = hashlib.sha256()
-        with urllib.request.urlopen(req, timeout=120) as resp, open(new_wheel, "wb") as out:
+        with urllib.request.urlopen(req, timeout=120) as resp, open(new_wheel, "wb") as out:  # noqa: S310
             while True:
                 chunk = resp.read(65536)
                 if not chunk:
@@ -355,7 +380,7 @@ def _check_worker_upgrade(
         ["uv", "pip", "install", "--reinstall", str(cur_wheel)],
     ):
         try:
-            result = subprocess.run(installer, capture_output=True, text=True, timeout=120)
+            result = subprocess.run(installer, capture_output=True, text=True, timeout=120)  # noqa: S603
             if result.returncode == 0:
                 install_ok = True
                 break
@@ -372,7 +397,7 @@ def _check_worker_upgrade(
                 ["uv", "pip", "install", "--reinstall", str(prev_wheel)],
             ):
                 try:
-                    r = subprocess.run(installer, capture_output=True, text=True, timeout=120)
+                    r = subprocess.run(installer, capture_output=True, text=True, timeout=120)  # noqa: S603
                     if r.returncode == 0:
                         break
                 except (OSError, subprocess.SubprocessError):
@@ -387,7 +412,7 @@ def _check_worker_upgrade(
 def _restart_process() -> None:
     """Re-exec the worker on the freshly installed wheel (separate so tests can replace it)."""
     try:
-        os.execv(sys.executable, [sys.executable] + sys.argv)
+        os.execv(sys.executable, [sys.executable] + sys.argv)  # noqa: S606 - re-exec of this interpreter after a verified upgrade
     except OSError as exc:
         print(f"[worker] FATAL: execv failed after upgrade: {exc} — exiting.", file=sys.stderr)
         sys.exit(1)
@@ -515,8 +540,16 @@ def run_worker(  # noqa: C901
             except OSError:
                 pass
 
-    def _apply_stop(run_ids) -> None:
-        """Stop the slots for the given run ids (ignores malformed ids and unknown runs)."""
+    def _apply_stop(run_ids, kill_ids=()) -> None:
+        """Stop the slots for the given run ids (ignores malformed ids and unknown runs).
+
+        ``kill_ids``: operator hard stop — the slot's monitor kills the tree without grace."""
+        kills = set()
+        for rid in kill_ids or ():
+            try:
+                kills.add(int(rid))
+            except (TypeError, ValueError):
+                continue
         for rid in run_ids:
             try:
                 irid = int(rid)
@@ -525,6 +558,8 @@ def run_worker(  # noqa: C901
             with slots_lock:
                 sl = slots.get(irid)
             if sl is not None:
+                if irid in kills:
+                    sl.setdefault("kill_flag", [False])[0] = True
                 _stop_slot(sl)
 
     def _finalize(run_id: int, token: "str | None" = None, **extra: object) -> None:
@@ -565,7 +600,7 @@ def run_worker(  # noqa: C901
         # ds2 §1.7: honor stop piggybacked on log-chunk (not only heartbeat).
         stop_ids = resp.get("stop_run_ids") if resp else None
         if stop_ids:
-            _apply_stop(stop_ids)
+            _apply_stop(stop_ids, resp.get("kill_run_ids") or ())
 
     from tqdaemon.worker_slot import WorkerSlot
 
@@ -623,7 +658,7 @@ def run_worker(  # noqa: C901
                     sl["stop_flag"][0] = True
         stop_ids = resp.get("stop_run_ids") if resp else None
         if stop_ids:
-            _apply_stop(stop_ids)
+            _apply_stop(stop_ids, resp.get("kill_run_ids") or ())
         elif resp and resp.get("stop_requested"):
             with slots_lock:
                 targets = list(slots.values()) if slots else []
@@ -700,7 +735,7 @@ def run_worker(  # noqa: C901
         kind = cmd.get("type")
         if kind == "stop_run_ids":
             stop_ids = cmd.get("run_ids") or []
-            _apply_stop(stop_ids)
+            _apply_stop(stop_ids, cmd.get("kill_run_ids") or ())
         elif kind == "drain":
             drain_flag[0] = True
             with slots_lock:
@@ -947,7 +982,7 @@ def _do_worker_sync_locked(home: Path) -> None:
 
             _nt = hide_console_check_output_kwargs()
             result = subprocess.run(
-                ["git", "pull", "--ff-only"],
+                ["git", "pull", "--ff-only"],  # noqa: S607
                 cwd=str(root),
                 capture_output=True,
                 text=True,
@@ -963,7 +998,7 @@ def _do_worker_sync_locked(home: Path) -> None:
         if (root / "pyproject.toml").is_file():
             try:
                 uv = subprocess.run(
-                    ["uv", "sync"],
+                    ["uv", "sync"],  # noqa: S607
                     cwd=str(root),
                     capture_output=True,
                     text=True,
@@ -998,7 +1033,7 @@ def _install_windows_service(home: Path, worker_id: str) -> None:
     task_name = f"tq-worker-{worker_id}"
     cmd = ["schtasks", "/create", "/tn", task_name, "/tr", script, "/sc", "onstart", "/ru", "SYSTEM", "/f"]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = subprocess.run(cmd, capture_output=True, text=True)  # noqa: S603
         if result.returncode == 0:
             print(f"[install-service] Task Scheduler task {task_name!r} created.")
         else:
@@ -1028,7 +1063,7 @@ def _install_systemd_service(home: Path, worker_id: str) -> None:
 def uninstall_worker_service(home: Path, worker_id: str) -> int:
     if sys.platform == "win32":
         task_name = f"tq-worker-{worker_id}"
-        res = subprocess.run(["schtasks", "/delete", "/tn", task_name, "/f"], capture_output=True, text=True)
+        res = subprocess.run(["schtasks", "/delete", "/tn", task_name, "/f"], capture_output=True, text=True)  # noqa: S603, S607
         if res.returncode != 0:
             # e.g. task missing, or created as SYSTEM and this shell is not elevated
             detail = (res.stderr or res.stdout or "").strip()
@@ -1058,11 +1093,11 @@ def setup_worker(
     print(f"[setup] Querying project configuration from master: {master_url}...")
 
     try:
-        req = urllib.request.Request(
+        req = urllib.request.Request(  # noqa: S310
             f"{master_url}/api/worker/projects",
             headers=_auth_headers(),
         )
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310
             projs = json.loads(resp.read().decode("utf-8"))
     except Exception as e:  # noqa: BLE001 - setup reports any fetch error
         print(f"[setup] Failed to fetch project list: {e}", file=sys.stderr)
@@ -1116,7 +1151,7 @@ def setup_worker(
                 from tqdaemon.win_console import hide_console_check_output_kwargs
 
                 _nt = hide_console_check_output_kwargs()
-                subprocess.run(["git", "clone", git_url, str(local_root)], check=True, **_nt)
+                subprocess.run(["git", "clone", git_url, str(local_root)], check=True, **_nt)  # noqa: S603, S607
             except (OSError, subprocess.SubprocessError) as e:
                 print(f"[setup] Failed to clone '{name}': {e}", file=sys.stderr)
 
@@ -1127,7 +1162,7 @@ def setup_worker(
                     from tqdaemon.win_console import hide_console_check_output_kwargs
 
                     _nt = hide_console_check_output_kwargs()
-                    subprocess.run(["uv", "sync"], cwd=str(local_root), **_nt)
+                    subprocess.run(["uv", "sync"], cwd=str(local_root), **_nt)  # noqa: S607
                 except (OSError, subprocess.SubprocessError) as e:
                     print(f"[setup] Failed to run 'uv sync': {e}", file=sys.stderr)
 

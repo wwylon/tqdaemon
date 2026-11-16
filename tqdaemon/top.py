@@ -78,9 +78,9 @@ def run_top(home: Path, *, once: bool = False, as_json: bool = False, out=None) 
     from tqdaemon.master_client import _auth_headers, master_url
 
     out = out or sys.stdout
-    req = urllib.request.Request(master_url(home) + "/api/events", headers=_auth_headers(home))
+    req = urllib.request.Request(master_url(home) + "/api/events", headers=_auth_headers(home))  # noqa: S310
     try:
-        resp = urllib.request.urlopen(req, timeout=30)
+        resp = urllib.request.urlopen(req, timeout=30)  # noqa: S310
     except OSError as exc:
         print(f"daemon not reachable: {exc}", file=sys.stderr)
         return 3

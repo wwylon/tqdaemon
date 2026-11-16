@@ -102,7 +102,7 @@ def probe_gpus(*, timeout: float = 5.0) -> GpuProbeResult:
             error="nvidia-smi not found (no NVIDIA driver or not in PATH)",
         )
     try:
-        proc = subprocess.run(
+        proc = subprocess.run(  # noqa: S603
             [
                 path,
                 "--query-gpu=index,name,memory.total,memory.used,driver_version,"
@@ -310,7 +310,7 @@ def probe_gpu_memory_used(*, timeout: float = 2.0) -> float | None:
     if not path:
         return None
     try:
-        proc = subprocess.run(
+        proc = subprocess.run(  # noqa: S603
             [path, "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
             timeout=timeout,
             capture_output=True,
@@ -368,7 +368,7 @@ def probe_gpu_compute_apps(*, timeout: float = 5.0) -> GpuProcessProbe:
             error="nvidia-smi not found (no NVIDIA driver or not in PATH)",
         )
     try:
-        proc = subprocess.run(
+        proc = subprocess.run(  # noqa: S603
             [
                 path,
                 "--query-compute-apps=pid,process_name,used_gpu_memory",

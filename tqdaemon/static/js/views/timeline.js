@@ -53,6 +53,26 @@ export async function _loadTimelineNow() {
   _renderTimeline(ok ? data : _tlLast, hours);
   return ok;
 }
+const _TL_NS_ORDER = ['paused', 'frozen', 'dead_dep', 'deps_unmet', 'beyond_window'];
+/** "N queued not on the timeline" (collapsible, grouped by reason); '' when nothing is hidden. */
+export function _tlNotShownHtml(list) {
+  if (!Array.isArray(list) || !list.length) return '';
+  const groups = {};
+  for (const x of list) (groups[x.reason] = groups[x.reason] || []).push(x);
+  const keys = Object.keys(groups).sort((a, b) => _TL_NS_ORDER.indexOf(a) - _TL_NS_ORDER.indexOf(b));
+  let html = `<details class="tl-notshown"><summary>${escHtml(i18n.t('tl.notShown', { n: list.length }))}</summary>`;
+  for (const k of keys) {
+    html += `<div class="tl-ns-group"><b>${escHtml(i18n.t('tl.ns.' + k))}</b> (${groups[k].length})<ul>`;
+    for (const x of groups[k]) {
+      const click = tqAct([['tqOpenDrawer', String(x.project), String(x.task_id)]]);
+      html += `<li><a href="#" data-click="${click}">${escHtml(x.project + '/' + x.task_id)}</a>`
+        + (x.detail ? ` <span class="tl-axis">${escHtml(i18n.t('tl.ns.waitsOn', { dep: x.detail }))}</span>` : '') + '</li>';
+    }
+    html += '</ul></div>';
+  }
+  return html + '</details>';
+}
+
 export function _renderTimeline(data, hours) {
   const host = document.getElementById('tl-scroll');
   const bunchEl = document.getElementById('tl-bunch');
@@ -62,6 +82,8 @@ export function _renderTimeline(data, hours) {
     staleEl.textContent = i18n.t('tl.stale');
   }
   if (!host || !data) return;
+  const nsEl = document.getElementById('tl-notshown');
+  if (nsEl) nsEl.innerHTML = _tlNotShownHtml(data.not_shown);
   const bars = data.bars || [];
   _showPageEmpty('tl-empty', 'tl-scroll', bars.length === 0);
   if (bunchEl) {

@@ -66,3 +66,35 @@ def test_journal_recovery_queues_finalize_for_unfinished_runs(tmp_path: Path) ->
     # F-194: mid-run crash finalizes as interrupted (master rejects status=unknown).
     assert pending[6]["status"] == "interrupted" and pending[6]["exit_code"] == -1
     assert not journal_path(tmp_path, 5).exists()  # replayed journal is collected
+
+
+def _signed_setup(monkeypatch, payload: bytes, sig, installs: list, restarts: list) -> None:
+    sha = hashlib.sha256(payload).hexdigest()
+    _setup(monkeypatch, payload, sha, installs, restarts)
+    info = {"version": "1.2.0", "upgrade_url": "/api/worker/wheel", "sha256": sha, "sig": sig}
+    monkeypatch.setattr(worker, "_get", lambda url: info)
+    from tqdaemon import worker_http
+
+    monkeypatch.setattr(worker_http, "_AUTH_TOKEN", "shared-token")
+
+
+def test_upgrade_with_token_requires_valid_master_signature(tmp_path: Path, monkeypatch) -> None:
+    from tqdaemon.auth import sign_upgrade
+
+    payload = b"wheel-bytes"
+    sha = hashlib.sha256(payload).hexdigest()
+    installs, restarts = [], []
+    _signed_setup(monkeypatch, payload, sign_upgrade("shared-token", "1.2.0", sha), installs, restarts)
+    assert worker._check_worker_upgrade("http://m", tmp_path) is True and restarts == [True]
+
+
+def test_upgrade_refused_when_signature_missing_or_wrong(tmp_path: Path, monkeypatch) -> None:
+    from tqdaemon.auth import sign_upgrade
+
+    payload = b"wheel-bytes"
+    sha = hashlib.sha256(payload).hexdigest()
+    for sig in (None, "", "deadbeef", sign_upgrade("other-token", "1.2.0", sha)):
+        installs, restarts = [], []
+        _signed_setup(monkeypatch, payload, sig, installs, restarts)
+        assert worker._check_worker_upgrade("http://m", tmp_path) is False
+        assert installs == [] and restarts == []

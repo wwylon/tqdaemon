@@ -84,7 +84,7 @@ def resolve_selectors(
     tags = [t for t in tags if t]
     if clauses or tags:
         rows = conn.execute(
-            "SELECT project, task_id, status, tags FROM tasks"
+            "SELECT project, task_id, status, tags FROM tasks"  # noqa: S608
             + (" WHERE " + " AND ".join(clauses) if clauses else "")
             + " ORDER BY project, task_id",
             params,

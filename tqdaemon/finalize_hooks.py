@@ -22,7 +22,7 @@ _log = logging.getLogger(__name__)
 
 def _run_teardown_async(td_cmd: list[str], td_timeout: float, td_best_effort: bool) -> None:
     try:
-        subprocess.run(td_cmd, timeout=td_timeout, check=not td_best_effort)
+        subprocess.run(td_cmd, timeout=td_timeout, check=not td_best_effort)  # noqa: S603
     except (OSError, subprocess.SubprocessError) as te:
         if not td_best_effort:
             print(f"[runner] teardown failed: {te}", flush=True)
@@ -69,7 +69,7 @@ def apply_finalize_wake_hooks(
                 pass
         if hook_ids_raw is None:
             fresh = conn.execute(
-                f"SELECT {hook_key} FROM tasks WHERE project = ? AND task_id = ?",
+                f"SELECT {hook_key} FROM tasks WHERE project = ? AND task_id = ?",  # noqa: S608
                 (project, task_id),
             ).fetchone()
             if fresh:

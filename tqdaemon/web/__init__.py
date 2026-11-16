@@ -60,6 +60,7 @@ def start_web_server(
     *,
     release_project: Callable[[str], dict[str, Any]] | None = None,
     relocate_project: Callable[[str, str], dict[str, Any]] | None = None,
+    rename_project: Callable[[str, str, bool, bool], dict[str, Any]] | None = None,
 ) -> threading.Thread:
     if db_path is None:
         from tqdaemon.config import db_path as _dbp
@@ -87,6 +88,7 @@ def start_web_server(
         bind_host,
         release_project=release_project,
         relocate_project=relocate_project,
+        rename_project=rename_project,
     )
     # Pre-warm psutil cpu_percent baseline so first /api/hardware is not all zeros.
     try:

@@ -1,7 +1,7 @@
 // @ts-check
 // Task drawer (info / YAML / history tabs, retry/force/stop/log actions). State lives in S.drawerTask, S.drawerTab,
 // S.drawerYamlMtime. Uses app.js globals at call time: tqAct, i18n, badge, res, _fetchJson, _isRestartStatus,
-// _progressPct, _lastRunProgressHtml, tqSetPriority, tqSetEnabled, retryTaskNew, forceTask, stopTask, tqQueueActive,
+// _progressPct, _lastRunProgressHtml, tqSetPriority, tqSetEnabled, retryTaskNew, forceTask, startNowTask, stopTask, killTask, tqQueueActive,
 // toggleCardLog, toggleQueueLog, toggleDashLog, toggleHistoryCardLog, toggleHistoryLog, tqOpenLogPanel.
 import { S } from '../core/state.js';
 import { latest } from '../core/api.js';
@@ -127,7 +127,14 @@ export function tqPaintDrawerHead() {
     force.disabled = starting || t.status !== 'queued';
     force.textContent = starting ? i18n.t('btn.starting') : i18n.t('drawer.force');
   }
+  const startNow = /** @type {HTMLInputElement | null} */ (document.getElementById('tq-drawer-startnow'));
+  if (startNow) {
+    const starting = !!(S.forceStarting && S.forceStarting[t.project + '/' + t.task_id]);
+    startNow.disabled = starting || !t.status || t.status === 'running';
+  }
   if (stop) stop.disabled = !(t.status === 'running' || t.status === 'queued');
+  const kill = /** @type {HTMLInputElement | null} */ (document.getElementById('tq-drawer-kill'));
+  if (kill) kill.disabled = t.status !== 'running';
   const hold = /** @type {HTMLInputElement | null} */ (document.getElementById('tq-drawer-hold'));
   const unhold = /** @type {HTMLInputElement | null} */ (document.getElementById('tq-drawer-unhold'));
   if (hold) hold.disabled = t.status !== 'running';
@@ -367,6 +374,7 @@ export async function tqDrawerWhy() {
     const lines = (info.reasons || []).map(x => '• ' + x);
     if (info.plan && !(info.reasons || []).some(x => String(x).startsWith('dry run'))) lines.push(i18n.t('drawer.whyDryRun') + ': ' + info.plan.verdict + (info.plan.reason ? ' — ' + info.plan.reason : ''));
     lines.push(..._whyNeedFreeLines(info.plan).map(x => '  ' + x));
+    if (info.ram_hint) lines.push(i18n.t('drawer.whyRamHint', {gib: Number(info.ram_hint.ram_gib).toFixed(1), src: info.ram_hint.source, key: t.project + '/' + t.task_id}));
     openAlert(lines.join('\n'), i18n.t('drawer.whyTitle') + ' ' + t.project + '/' + t.task_id);
   } catch (e) {
     showToast(String(e.message || e), 'err');
@@ -420,7 +428,9 @@ export function tqDrawerAction(kind) {
   const btn = document.getElementById('tq-drawer-' + kind);
   if (kind === 'retry') retryTaskNew(t.project, t.task_id, btn);
   else if (kind === 'force') forceTask(btn, t.project, t.task_id);
+  else if (kind === 'startnow') startNowTask(btn, t.project, t.task_id);
   else if (kind === 'stop') stopTask(btn, t.project, t.task_id);
+  else if (kind === 'kill') killTask(btn, t.project, t.task_id);
   else if (kind === 'hold') holdTask(btn, t.project, t.task_id);
   else if (kind === 'unhold') unholdTask(btn, t.project, t.task_id);
 }

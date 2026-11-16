@@ -77,9 +77,9 @@ def post_json(
         headers["Authorization"] = f"Bearer {token}"
         headers["X-TQ-Token"] = token
     data = json.dumps(body or {}).encode()
-    req = urllib.request.Request(f"{base_url.rstrip('/')}{path}", data=data, headers=headers, method="POST")
+    req = urllib.request.Request(f"{base_url.rstrip('/')}{path}", data=data, headers=headers, method="POST")  # noqa: S310
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
             return json.loads(resp.read().decode() or "{}")
     except urllib.error.HTTPError as exc:
         try:
@@ -99,11 +99,11 @@ def api_request(
     """POST/GET JSON. Returns parsed dict, or None if the daemon is unreachable."""
     url = master_url(home) + (path if path.startswith("/") else "/" + path)
     data = None if body is None else json.dumps(body).encode("utf-8")
-    req = urllib.request.Request(
+    req = urllib.request.Request(  # noqa: S310
         url, data=data, method=method.upper(), headers={**identity_headers(), **_auth_headers(home)}
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
             raw = resp.read().decode("utf-8", errors="replace")
             if not raw.strip():
                 return {"ok": True}

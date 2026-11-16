@@ -280,6 +280,89 @@ def cmd_release(home: Path, project: str) -> int:
     return 0
 
 
+def _print_rename(resp: dict, *, dry_run: bool) -> None:
+    old, new = resp.get("old"), resp.get("new")
+    print(f"{'Would rename' if dry_run else 'Renamed'} project {old} -> {new}")
+    status = resp.get("status") or {}
+    if status:
+        print("  tasks: " + ", ".join(f"{n} {s}" for s, n in sorted(status.items())))
+    for key, n in sorted((resp.get("rows") or resp.get("applied") or {}).items()):
+        print(f"  {key}: {n}")
+    if resp.get("reference_rows"):
+        print(f"  tasks in other projects referencing {old}/...: {resp['reference_rows']}")
+    if resp.get("config_keys"):
+        print(f"  config keys moved: {len(resp['config_keys'])}")
+    if resp.get("log_folder"):
+        print(f"  log folder moves: {resp['log_folder']}")
+    for path in resp.get("stale_yaml_mentions") or []:
+        print(f"  still says '{old}/' (alias keeps it working): {path}")
+    if not dry_run:
+        print(f"  backups: {resp.get('backup')}  {resp.get('projects_yaml_backup')}")
+        print(f"  undo: tq project rename {new} {old}")
+        for line in resp.get("checklist") or []:
+            print(f"  todo: {line}")
+    for w in resp.get("warnings") or []:
+        print(f"  warning: {w}", file=sys.stderr)
+
+
+def cmd_project_rename(home: Path, old: str, new: str, *, dry_run: bool = False, alias: bool = True) -> int:
+    """Rename a project id with its history (master when a daemon runs, else directly)."""
+    from tqdaemon._cli_helpers import EXIT_UNREACHABLE, master_mutation
+
+    resp, mode = master_mutation(
+        home, f"/api/project/rename/{old}", body={"new": new, "dry_run": dry_run, "alias": alias}
+    )
+    if mode == "unreachable":
+        return EXIT_UNREACHABLE
+    if mode == "offline":
+        from tqdaemon.db import open_db
+        from tqdaemon.project_rename import RenameError, checklist, plan_rename, rename_project
+
+        db = open_db(_db(home))
+        try:
+            try:
+                resp = (
+                    {**plan_rename(home, db, old, new), "dry_run": True}
+                    if dry_run
+                    else {**rename_project(home, db, old, new, alias=alias), "checklist": checklist(old, new)}
+                )
+            except RenameError as exc:
+                resp = {"ok": False, "error": str(exc)}
+        finally:
+            db.close()
+    if not resp or not resp.get("ok"):
+        print(f"Error: {(resp or {}).get('error', 'failed')}", file=sys.stderr)
+        return 1
+    _print_rename(resp, dry_run=dry_run)
+    return 0
+
+
+def cmd_project_alias(home: Path, rest: list[str]) -> int:
+    """``tq project alias list`` / ``tq project alias rm <old>`` (read/write the DB directly; tiny table)."""
+    from tqdaemon.db import open_db
+    from tqdaemon.project_rename import list_aliases, remove_alias
+
+    db = open_db(_db(home))
+    try:
+        if rest[:1] == ["list"] or not rest:
+            rows = list_aliases(db)
+            if not rows:
+                print("No project aliases.")
+            for r in rows:
+                print(f"{r['old']} -> {r['new']}  (since {r['created_at'][:10]})")
+            return 0
+        if rest[0] == "rm" and len(rest) == 2:
+            if remove_alias(db, rest[1]):
+                print(f"alias {rest[1]} removed")
+                return 0
+            print(f"no alias named {rest[1]}", file=sys.stderr)
+            return 1
+    finally:
+        db.close()
+    print("Usage: tq project alias [list | rm <old>]")
+    return 1
+
+
 def cmd_relocate(home: Path, project: str, new_root: str) -> int:
     """F-240: rewrite projects.yaml root + yaml_source after the folder has moved."""
     if not _project_exists(home, project):
@@ -941,7 +1024,7 @@ def cmd_suite(home: Path, action: str, suite_name: str) -> int:
 
         placeholders = ",".join("?" * len(RETRYABLE_STATUSES))
         rows = conn.execute(
-            f"SELECT project, task_id, status FROM tasks WHERE suite=? AND status IN ({placeholders})",
+            f"SELECT project, task_id, status FROM tasks WHERE suite=? AND status IN ({placeholders})",  # noqa: S608
             (suite_name, *sorted(RETRYABLE_STATUSES)),
         ).fetchall()
         n = 0
@@ -1013,6 +1096,27 @@ def cmd_resync(
     return 0 if ok == len(worker_ids) else 1
 
 
+def _poll_archive_job(home: Path, job_id: str, *, interval: float = 2.0, timeout: float = 3600.0) -> dict:
+    """Poll ``GET /api/jobs/<id>`` until the archive job finishes; returns an archive-shaped response."""
+    import time as _time
+
+    from tqdaemon.master_client import via_master
+
+    print(f"Archive running as job {job_id} ...", flush=True)
+    deadline = _time.monotonic() + timeout
+    while _time.monotonic() < deadline:
+        job = via_master(home, "GET", f"/api/jobs/{job_id}", timeout=30.0)
+        if job is None:
+            return {"ok": False, "error": f"daemon stopped answering while job {job_id} was running"}
+        state = job.get("state")
+        if state == "done":
+            return {"ok": True, **(job.get("result") or {})}
+        if state == "error" or not job.get("ok", True):
+            return {"ok": False, "error": job.get("error") or "archive job failed"}
+        _time.sleep(interval)
+    return {"ok": False, "error": f"archive job {job_id} still running after {timeout:.0f}s; poll /api/jobs/{job_id}"}
+
+
 def cmd_archive(
     home: Path,
     *,
@@ -1021,6 +1125,7 @@ def cmd_archive(
     statuses: list[str] | None = None,
     dry_run: bool = False,
     max_completed_runs: int | None = None,
+    task_glob: str | None = None,
 ) -> int:
     """Archive old finished tasks (JSONL export + YAML moved aside + DB rows dropped)."""
     from tqdaemon.master_client import via_master
@@ -1032,7 +1137,13 @@ def cmd_archive(
         body["statuses"] = list(statuses)
     if max_completed_runs is not None:
         body["max_completed_runs"] = int(max_completed_runs)
-    resp = via_master(home, "POST", "/api/cli/archive", body=body, timeout=120.0)
+    if task_glob:
+        body["task_glob"] = task_glob
+    if not dry_run:
+        body["async"] = True  # C7: master runs it as a polled job; an older daemon answers inline
+    resp = via_master(home, "POST", "/api/cli/archive", body=body, timeout=900.0)
+    if resp is not None and resp.get("job"):
+        resp = _poll_archive_job(home, str(resp["job"]))
     if resp is None:
         if _daemon_running(home) is not None:
             print("[ERROR] daemon is running but did not answer; refusing a direct SQLite write.", file=sys.stderr)
@@ -1059,6 +1170,7 @@ def cmd_archive(
                     only_projects=projects or None,
                     dry_run=dry_run,
                     max_completed_runs=max_completed_runs,
+                    task_glob=task_glob,
                 ),
             }
         finally:
@@ -1073,4 +1185,112 @@ def cmd_archive(
     if extra > 0:
         print(f"  ... and {extra} more")
     print(f"{verb} {resp.get('archived', 0)} task(s).")
+    if resp.get("kept_as_dependency"):
+        print(f"Kept {resp['kept_as_dependency']} task(s) that unfinished tasks depend on.")
+    return 0
+
+
+def _limit_tree(home: Path) -> dict:
+    """Limits tree from the master, or built from SQLite when no daemon runs."""
+    from tqdaemon.master_client import via_master
+
+    tree = via_master(home, "GET", "/api/limits/tree")
+    if tree is not None and "nodes" in tree:
+        return tree
+    from tqdaemon.config import load_projects
+    from tqdaemon.db import open_db
+    from tqdaemon.limit_tree import build_limit_tree
+
+    db = open_db(_db(home))
+    try:
+        return build_limit_tree(db, load_projects(home))
+    finally:
+        db.close()
+
+
+def _resolve_limit_node(tree: dict, name: str) -> tuple[dict | None, str | None]:
+    nodes = tree["nodes"]
+    if name in ("all", "", "/"):
+        return nodes["all"], None
+    if name.startswith(("set:", "project:")):
+        return nodes.get(name), None if name in nodes else f"no node {name!r}"
+    hits = [n for n in (nodes.get(f"project:{name}"), nodes.get(f"set:{name.strip('/')}")) if n]
+    if len(hits) == 2:
+        return None, f"{name!r} is both a project and a set; use project:{name} or set:{name}"
+    if not hits:
+        return None, f"no project or set named {name!r} (see: tq limits)"
+    return hits[0], None
+
+
+def _fmt_limits(node: dict, nodes: dict) -> str:
+    parts = []
+    for f in node["fields"]:
+        own = node["own"].get(f)
+        eff = node["effective"].get(f)
+        short = f.replace("max_", "").replace("_gib", "")
+        if own:
+            parts.append(f"{short}={own:g}")
+        elif eff:
+            parts.append(f"{short}≤{eff['value']:g} ({nodes[eff['from']]['label']})")
+    u = node["usage"]
+    use = f"running {u['running']:g}"
+    return (" ".join(parts) or "no caps") + f"  · {use}"
+
+
+def cmd_limits(home: Path, rest: list[str]) -> int:
+    """tq limits [<node> [field=val …]] — one limits tree: all > sets > projects."""
+    from tqdaemon._cli_helpers import EXIT_UNREACHABLE, master_mutation
+
+    tree = _limit_tree(home)
+    nodes = tree["nodes"]
+    if not rest:
+
+        def walk(nid: str, depth: int) -> None:
+            n = nodes[nid]
+            tag = {"root": "", "set": "/", "project": ""}[n["kind"]]
+            print(f"{'  ' * depth}{n['label']}{tag}  {_fmt_limits(n, nodes)}")
+            for c in sorted(n["children"], key=lambda c: (nodes[c]["kind"] != "set", nodes[c]["label"])):
+                walk(c, depth + 1)
+
+        walk("all", 0)
+        print("\nCaps are totals of everything running under a node; ≤N (from) = tightest ancestor cap.")
+        return 0
+    node, err = _resolve_limit_node(tree, rest[0])
+    if node is None:
+        print(f"Error: {err}")
+        return 1
+    if len(rest) == 1:
+        print(f"{node['id']}: {_fmt_limits(node, nodes)}")
+        for f in node["fields"]:
+            own = node["own"].get(f)
+            eff = node["effective"].get(f)
+            src = f" (effective {eff['value']:g} from {nodes[eff['from']]['label']})" if eff and not own else ""
+            print(f"  {f} = {own:g}" if own else f"  {f} = -{src}")
+        return 0
+    fields: dict[str, str] = {}
+    for kv in rest[1:]:
+        k, sep, v = kv.partition("=")
+        if not sep:
+            print(f"Error: expected field=value, got {kv!r}")
+            return 1
+        fields[k.strip()] = v.strip()
+    body = {"kind": node["kind"], "path": node["path"], "fields": fields}
+    resp, mode = master_mutation(home, "/api/limits/node", body=body)
+    if mode == "unreachable":
+        return EXIT_UNREACHABLE
+    if mode == "master":
+        err2 = None if resp and resp.get("ok") else (resp or {}).get("error", "failed")
+    else:
+        from tqdaemon.db import open_db
+        from tqdaemon.limit_tree import write_limit_node
+
+        db = open_db(_db(home))
+        try:
+            err2 = write_limit_node(db, node["kind"], node["path"], fields)
+        finally:
+            db.close()
+    if err2:
+        print(f"Error: {err2}")
+        return 1
+    print(f"{node['id']}: " + ", ".join(f"{k}={v or 'cleared'}" for k, v in fields.items()))
     return 0

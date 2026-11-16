@@ -136,6 +136,10 @@ idle GPU is taken first without fragmenting VRAM or holding CPU work back when t
 Priority still wins. The host CPU gate (`cpu_limit_pct`) and pressure cooldowns can still delay every
 admission, GPU tasks included. `tq config set gpu_first=0` turns it off.
 
+**GPU leases (`tq lease`, `tq gpu run`).** Interactive GPU work (a pytest GPU tier, a demo) can ask the scheduler for VRAM instead of racing it: `tq gpu run --vram 3 -- python demo.py` waits until the VRAM is free, runs the command and releases the lease. Active leases are held like a running task's declared `gpu_vram_gib` (`max(live host VRAM, declared tasks + leases)`, never the sum), waiting leases are granted in priority then FIFO order before queued tasks, and a lease ends on release, TTL (default 900 s) or when its holder process dies. They appear in `tq capacity`.
+
+**Ollama unload (`ollama_unload_url`, default off).** Set it to an Ollama base URL and a GPU task that is blocked on VRAM (and does not itself use Ollama) makes the daemon ask every resident model there to unload (`keep_alive: 0`), at most once a minute. Remote URLs need `notify_allow_remote=1`.
+
 **Exclusive drain.** When the top runnable task is `exclusive` (or `exclusive_project`)
 and others are still running, no other task (of that project, for `exclusive_project`) is
 admitted until it has started. Without the drain, a steady supply of small tasks would keep
@@ -245,6 +249,26 @@ child set can be tighter than its parent. The root ("all") is the global config.
 below what runs stops the newest local runs of that set. Only `min_tasks` is inherited per project.
 Blocked tasks show `set <path> <field>=<cap> reached`.
 
+### One limits tree
+
+All caps live in one tree — `all` (global config) > sets > projects — with the same fields on every
+node (`max_tasks`, `max_cpu_cores`, `max_ram_gib`, `max_gpu_vram_gib`, `max_gpu_hours_day`). A cap is the
+total of everything running under its node; an empty value means no cap of its own, and the tightest
+ancestor still applies. `tq limits` prints the tree (own value, or `≤N (node)` for the effective
+ancestor cap, plus running count); `tq limits <node> field=value` sets one (`all`, a set path, a project,
+or `set:`/`project:` to disambiguate; empty value clears). The web UI edits the same tree in
+Settings → Limits (project page: **⚖ Limits…**). API: `GET /api/limits/tree`, `POST /api/limits/node`
+`{kind: root|set|project, path, fields}`. Storage is unchanged (global keys, `set_limit_*`,
+`project_limit_*`). Task groups, tags and suites are labels inside a project and carry no limits.
+
+### Hard stop
+
+`tq stop <task>` is cooperative: a control file asks the task to checkpoint, and the tree is killed only
+after `graceful_stop_sec`. `tq stop <task> --now` (UI **Kill now**, `POST /api/stop/<p>/<t>?hard=1`,
+MCP `stop_task hard=true`, `tq stop --project P --now`) sets `stop_requested = 2`: the next tick kills the
+process tree with no grace — also upgrading a cooperative stop that is still waiting — and the run ends
+**interrupted** with `tq.stop.killed`. Remote workers get the run in `kill_run_ids` and kill it at once.
+
 ### VRAM admission: declared vs live
 
 Declared `resources.gpu_vram_gib` is **not** summed against physical VRAM for
@@ -309,6 +333,13 @@ one night, then turn the mode off so `fits()` blocks again.
 
 `tq force <project/task_id>` bypasses the gates; the daemon logs a WARN naming
 the gate that was overridden.
+
+`tq start-now <project/task_id>` (UI drawer **Start now**) is the safe operator
+start: the task goes first in line (before the candidate window cut) and RAM/VRAM
+*held* for other tasks — the P6 top-task reservation and same-tick admissions —
+does not count against it. It still needs real headroom (live usage + its
+estimate under the soft limit) and respects dependencies, locks, anti-flap and
+project/set/global caps. Stored as `force_run = 2`; cleared when the task starts.
 
 ## 4. Stopping under pressure
 
@@ -505,9 +536,11 @@ These are real and not yet addressed — do not read the above as full protectio
 - **No per-process SM%.** Device GPU util is sampled while a task has attributed
   VRAM; two concurrent GPU tasks show the same device %. Remote live GPU % is
   not on the worker heartbeat (peak sidecar VRAM is recorded at finalize).
-- **CPU is not gated on real usage.** `cpu_reserved` only accumulates *declared*
-  `cpu_cores`. A task declaring 1 core that spawns 32 threads is accounted as 1.
-  `cpu_cores_used_by_pids()` (`resources.py`) exists but is unwired.
+- **CPU is gated on declared cores by default.** `cpu_reserved` accumulates *declared*
+  `cpu_cores`, so a task declaring 1 core that spawns 32 threads is accounted as 1. Opt in with
+  `tq config set cpu_charge_measured 1`: each running local task is then charged
+  `max(declared cpu_cores, measured cores)` (its sampled CPU % of the host × logical cores) when
+  admitting new tasks. `tq plan` / `tq why` do not yet show the measured number.
 - **VRAM hard stop is host-wide, not per-task.** Admission still uses declared
   `gpu_vram_gib`. At runtime, when device used% exceeds `vram_hard_limit_pct`
   (default 95), the daemon stops the highest-VRAM local queue victim as
@@ -534,6 +567,16 @@ On startup the daemon adopts every local `running` run whose wrapper is still al
 `tq restart` now refuses only for running tasks that cannot be adopted (started before the setting was on, or remote); it asks the stopping daemon to leave adoptable runs alive for its successor. `tq stop-daemon` still stops every task. After a crash, adoptable tasks keep running and the next daemon adopts them.
 
 Costs and limits: one small Python wrapper process per run (counted in the task's RAM); output lines are not timestamped by the daemon (as on Windows today); TQ_METRIC series and warn/error counts collected before the restart are kept in the database but the in-memory series restarts. Remote workers are unaffected (they use leases).
+
+## Restarting without losing work (drain, hand-over, shutdown stage)
+
+| Goal | Command | What happens |
+|---|---|---|
+| Restart now, keep adoptable runs | `tq restart` | Asks the stopping daemon to leave runs started with `adopt_on_restart=1` alive; the new daemon adopts them. Refuses for runs that cannot be adopted (use `--force` to stop those). |
+| Slow restart: let running tasks finish, start nothing new | `tq drain on`, wait until `tq drain status` says 0 running, `tq restart`, then `tq drain off` (it is a config key, `admission_drain`, so it survives the restart until you turn it off) | No local admission and no remote worker claim while draining; queued tasks show `admission drained`; Force / Start now from the UI still go through. |
+| Stop the daemon but keep runs | `tq stop-daemon --keep-runs` | Same hand-over as restart, without starting a new daemon. Plain `tq stop-daemon` stops and re-queues every running task, so it refuses while any run. |
+
+While the daemon is shutting down (signal received, runs being handed over or stopped) `GET /api/status` carries `lifecycle: {shutting_down, shutdown_since, keep_runs, draining}` and the web UI shows an amber banner: "shutting down — N task(s) keep running and are adopted by the next daemon" or "… are being stopped and re-queued"; in drain mode a "Drain mode" banner. The banner appears on the next poll after the signal; if the UI cannot reach the daemon at all it shows the red offline banner instead.
 
 ## Dry-run: `tq plan` / `GET /api/plan`
 

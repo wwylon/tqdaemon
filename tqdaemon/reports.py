@@ -25,7 +25,7 @@ def build_report(
         params.append(project)
 
     status_rows = conn.execute(
-        f"SELECT status, COUNT(*) AS n FROM runs WHERE started_at >= ?{proj_sql} GROUP BY status",
+        f"SELECT status, COUNT(*) AS n FROM runs WHERE started_at >= ?{proj_sql} GROUP BY status",  # noqa: S608
         params,
     ).fetchall()
     by_status = {r["status"] or "unknown": int(r["n"]) for r in status_rows}
@@ -39,7 +39,7 @@ def build_report(
     by_error = {r["last_error_code"]: int(r["n"]) for r in conn.execute(err_sql, err_params).fetchall()}
 
     dur_row = conn.execute(
-        f"SELECT AVG("
+        f"SELECT AVG("  # noqa: S608
         f"  CASE WHEN finished_at IS NOT NULL AND started_at IS NOT NULL "
         f"  THEN (julianday(replace(finished_at,'Z','')) - julianday(replace(started_at,'Z',''))) * 86400.0 "
         f"  END"
@@ -52,14 +52,14 @@ def build_report(
         avg_completed_sec = round(float(dur_row["avg_sec"]), 1)
 
     recent_fail = conn.execute(
-        f"SELECT project, task_id, status, exit_code, started_at, finished_at "
+        f"SELECT project, task_id, status, exit_code, started_at, finished_at "  # noqa: S608
         f"FROM runs WHERE started_at >= ? AND status IN ('failed','interrupted'){proj_sql} "
         f"ORDER BY run_id DESC LIMIT 25",
         params,
     ).fetchall()
 
     task_counts = conn.execute(
-        "SELECT status, COUNT(*) AS n FROM tasks WHERE 1=1"
+        "SELECT status, COUNT(*) AS n FROM tasks WHERE 1=1"  # noqa: S608
         + (" AND project = ?" if project else "")
         + " GROUP BY status",
         ([project] if project else []),

@@ -106,7 +106,7 @@ def spawn_with_guard(
     """
     if sys.platform == "win32":
         job = _create_job_object(kill_on_close)
-        proc = subprocess.Popen(args, **popen_kwargs)
+        proc = subprocess.Popen(args, **popen_kwargs)  # noqa: S603
         # Console ctrl events can only be aimed at a process *group*; remember whether the child leads one.
         proc._tq_own_group = bool(int(popen_kwargs.get("creationflags", 0) or 0) & _CREATE_NEW_PROCESS_GROUP)  # type: ignore[attr-defined]
         try:
@@ -117,7 +117,7 @@ def spawn_with_guard(
     else:
         # New session → new pgid; kill(-pgid) reaches all descendants
         popen_kwargs.setdefault("start_new_session", True)
-        proc = subprocess.Popen(args, **popen_kwargs)
+        proc = subprocess.Popen(args, **popen_kwargs)  # noqa: S603
         pgid = os.getpgid(proc.pid)
         return proc, pgid
 

@@ -42,7 +42,14 @@ export class El {
   appendChild(c) { c.parentNode = this; this.children.push(c); return c; }
   append(...cs) { cs.forEach(c => typeof c === 'string' ? null : this.appendChild(c)); }
   prepend(c) { c.parentNode = this; this.children.unshift(c); }
-  insertBefore(c) { return this.appendChild(c); }
+  insertBefore(c, ref) {
+    // Faithful to real DOMs: a reference node that is not a direct child throws (it used to be ignored).
+    if (ref == null) return this.appendChild(c);
+    const i = this.children.indexOf(ref);
+    if (i < 0) throw Object.assign(new Error("Failed to execute 'insertBefore' on 'Node': the node before which the new node is to be inserted is not a child of this node."), { name: 'NotFoundError' });
+    if (c.parentNode) c.parentNode.children = c.parentNode.children.filter(x => x !== c);
+    c.parentNode = this; this.children.splice(this.children.indexOf(ref), 0, c); return c;
+  }
   insertAdjacentHTML(pos, h) { this._html = pos === 'afterbegin' || pos === 'beforebegin' ? h + this._html : this._html + h; }
   removeChild(c) { c.remove(); return c; }
   replaceWith(n) { const p = this.parentNode; if (!p) return; const i = p.children.indexOf(this); n.parentNode = p; p.children[i] = n; this.parentNode = null; }

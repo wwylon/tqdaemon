@@ -1074,6 +1074,17 @@ td.task-cell .task-id-mono { overflow-wrap: anywhere; word-break: break-all; }
 .filter-chip.chip-st-waiting { background: var(--badge-waiting-bg); color: var(--badge-waiting-fg); }
 .filter-chip.chip-st-completed { background: var(--badge-completed-bg); color: var(--badge-completed-fg); }
 .filter-chip.chip-st.active { outline: 2px solid var(--accent, var(--text)); outline-offset: 1px; }
+/* Queue status filter chips use the status badge colours; the active one gets an outline. */
+.filter-chip[data-status="queued"] { background: var(--badge-queued-bg); color: var(--badge-queued-fg); border-color: transparent; }
+.filter-chip[data-status="running"] { background: var(--badge-running-bg); color: var(--badge-running-fg); border-color: transparent; }
+.filter-chip[data-status="completed"] { background: var(--badge-completed-bg); color: var(--badge-completed-fg); border-color: transparent; }
+.filter-chip[data-status="failed"] { background: var(--badge-failed-bg); color: var(--badge-failed-fg); border-color: transparent; }
+.filter-chip[data-status="interrupted"] { background: var(--badge-interrupted-bg); color: var(--badge-interrupted-fg); border-color: transparent; }
+.filter-chip[data-status="stopped"] { background: var(--badge-stopped-bg); color: var(--badge-stopped-fg); border-color: transparent; }
+.filter-chip[data-status="suspended"] { background: var(--badge-suspended-bg); color: var(--badge-suspended-fg); border-color: transparent; }
+.filter-chip[data-status="disabled"] { background: var(--badge-disabled-bg); color: var(--badge-disabled-fg); border-color: transparent; }
+.filter-chip[data-status="cancelled"], .filter-chip[data-status="unknown"] { background: var(--badge-stopped-bg); color: var(--badge-stopped-fg); border-color: transparent; }
+.filter-chip[data-status]:not([data-status="all"]).active { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 /* GPU memory by program (Resources → hardware) */
 .gpu-proc { margin-top: 10px; }
@@ -1084,3 +1095,65 @@ td.task-cell .task-id-mono { overflow-wrap: anywhere; word-break: break-all; }
 .gpu-proc-other td { color: var(--muted); font-style: italic; }
 .gpu-proc-tq { margin-left: 4px; padding: 0 5px; border-radius: 8px; font-size: 10px; background: var(--badge-running-bg); color: var(--badge-running-fg); }
 .gpu-proc-hint, .gpu-proc-empty { margin-top: 4px; font-size: 11px; color: var(--muted); }
+
+/* ---- Settings dialog (cfgmodal.js / limittree.js) ---- */
+.cfg-settings-modal { width: min(920px, 96vw); max-width: 96vw; }
+.cfg-tabs { display: flex; flex-wrap: wrap; gap: 2px; border-bottom: 1px solid var(--border); margin: 0 0 10px; }
+.cfg-tab { background: none; border: 0; border-bottom: 2px solid transparent; color: var(--muted); padding: 6px 10px; font-size: 13px; cursor: pointer; }
+.cfg-tab.active { color: var(--text); border-bottom-color: var(--accent, #4a8cff); }
+.cfg-body { min-height: 320px; max-height: 62vh; overflow: auto; }
+.cfg-dirty { margin-right: auto; font-size: 12px; color: var(--muted); }
+.cfg-dirty.on { color: var(--warn, #d9a400); font-weight: 600; }
+.cfg-settings { display: flex; flex-direction: column; gap: 2px; }
+.cfg-srow { display: flex; align-items: center; gap: 12px; padding: 6px 4px; border-radius: 4px; }
+.cfg-srow:hover { background: var(--bg3); }
+.cfg-srow.dirty { box-shadow: inset 3px 0 0 var(--warn, #d9a400); }
+.cfg-srow label { flex: 1; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.cfg-srow input[type=number], .cfg-srow input[type=text], .cfg-srow input[type=password], .cfg-srow select,
+.lim-row input, .lim-row select, .cfg-filter {
+  background: var(--bg3); border: 1px solid var(--border); color: var(--text); border-radius: 4px; padding: 3px 8px; font-size: 13px;
+}
+.cfg-srow input[type=number] { width: 110px; }
+.cfg-srow input[type=text], .cfg-srow input[type=password] { width: 220px; }
+.cfg-key { font-family: var(--mono, monospace); font-size: 12px; }
+.cfg-help { font-size: 12px; color: var(--muted); }
+.cfg-meta { font-size: 11px; color: var(--muted); }
+.cfg-filter { width: 100%; margin-bottom: 8px; }
+.lim-wrap { display: flex; gap: 14px; align-items: flex-start; }
+.lim-left { flex: 0 0 300px; max-height: 56vh; overflow: auto; border-right: 1px solid var(--border); padding-right: 8px; }
+.lim-right { flex: 1; min-width: 0; }
+.lim-tree { list-style: none; margin: 0; padding: 0; }
+.lim-node { display: flex; align-items: center; gap: 6px; padding: 3px 6px 3px calc(6px + var(--depth, 0) * 14px); border-radius: 4px; cursor: pointer; font-size: 13px; }
+.lim-node:hover { background: var(--bg3); }
+.lim-node.sel { background: var(--bg3); outline: 1px solid var(--accent, #4a8cff); }
+.lim-node.dirty .lim-name::after { content: ' •'; color: var(--warn, #d9a400); }
+.lim-set .lim-name, .lim-root .lim-name { font-weight: 600; }
+.lim-ico { width: 12px; color: var(--muted); }
+.lim-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lim-use { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.lim-use.lim-full { color: var(--fail); }
+.lim-bar { width: 36px; height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; }
+.lim-bar i { display: block; height: 100%; background: var(--accent, #4a8cff); }
+.lim-bar.lim-full i { background: var(--fail); }
+.lim-addset { margin-top: 8px; }
+.lim-head { font-size: 15px; margin-bottom: 4px; }
+.lim-kind { font-size: 11px; color: var(--muted); text-transform: uppercase; margin-left: 6px; }
+.lim-note, .lim-foot { font-size: 12px; color: var(--muted); margin: 4px 0 10px; }
+.lim-fields { display: flex; flex-direction: column; gap: 6px; }
+.lim-row { display: flex; align-items: center; gap: 10px; margin: 4px 0; }
+.lim-lbl { flex: 0 0 190px; font-size: 13px; }
+.lim-row input { width: 120px; }
+.lim-now { font-size: 12px; color: var(--muted); }
+.lim-actions { margin-top: 12px; display: flex; gap: 6px; }
+.tq-act-kill { color: var(--fail); }
+@media (max-width: 700px) {
+  .lim-wrap { flex-direction: column; }
+  .lim-left { flex: none; width: 100%; border-right: 0; border-bottom: 1px solid var(--border); max-height: 30vh; }
+  .lim-lbl { flex-basis: 140px; }
+}
+
+/* Timeline: queued tasks with no bar, grouped by reason. */
+.tl-notshown { margin: 8px 0; font-size: 0.8571rem; color: var(--text2); }
+.tl-notshown summary { cursor: pointer; }
+.tl-ns-group { margin: 4px 0 4px 12px; }
+.tl-ns-group ul { margin: 2px 0 6px 16px; padding: 0; }

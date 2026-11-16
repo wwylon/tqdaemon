@@ -87,4 +87,4 @@ def admit_task_select_sql(conn: Any) -> str:
             if str(r[1]) not in _ADMIT_TASK_EXCLUDE
         ]
         _admit_cols_cache = ", ".join(names) if names else "*"
-    return f"SELECT {_admit_cols_cache} FROM tasks"
+    return f"SELECT {_admit_cols_cache} FROM tasks"  # noqa: S608

@@ -16,6 +16,8 @@ Each bar is one queued, running, or soon-to-fire cron task. Bars share a forward
 
 This is advisory: it does not model live host RAM pressure, remote worker binpack, or service probes. The header project filter applies. Scroll horizontally when the chart is wider than the page.
 
+**Queued tasks with no bar** are listed under the chart ("N queued task(s) not on the timeline"), grouped by reason: the project is **paused** or **frozen**; a **dependency failed or is missing** (retry or remove it); it waits on a dependency that will not finish in the window; or it would **start after the window** (pick a longer window). Set caps from Settings → Limits are not modelled here — only global and per-project caps.
+
 Bars are ordered by projected start. Changing the header project reloads the forecast immediately.
 
 **Times** are in your local clock: the axis shows `HH:MM`, each row shows `start–end`, and the header shows when the queue is expected to drain (`~` marks an estimate that is not from the task's own history). The forecast is cached for about 20 s on the server and refreshed from the page at most once every 15 s after the previous request finished (slower after errors; a "stale" note appears if the last refresh failed). Very large queues show the first 300 bars. Prefer the header **project** filter when possible — scoped forecasts skip other projects' open runs and history. **Right-click** a bar for Details, Set priority, ±10, Stop, Retry, Force run, Disable and more; click a bar for the details drawer, which also has priority and enable/disable controls.

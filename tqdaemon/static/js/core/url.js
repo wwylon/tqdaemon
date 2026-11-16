@@ -129,6 +129,12 @@ export function _applyUiVars(state) {
   const pb = document.getElementById('proj-pause-btn');
   if (pb) pb.style.display = isSpecific ? '' : 'none';
   if (fb) fb.style.display = isSpecific ? '' : 'none';
+  const lb = document.getElementById('proj-limits-btn');
+  if (lb) lb.style.display = isSpecific ? '' : 'none';
+  const ab = document.getElementById('proj-archive-btn');
+  if (ab) ab.style.display = isSpecific ? '' : 'none';
+  const rb = document.getElementById('proj-rename-btn');
+  if (rb) rb.style.display = isSpecific ? '' : 'none';
   if (sb) sb.style.display = isSpecific ? '' : 'none';
   if (typeof _updateFreezeBtn === 'function') _updateFreezeBtn();
   if (typeof _showProjectRoot === 'function') _showProjectRoot(S.selectedProject);
@@ -186,6 +192,12 @@ export function setProject(val, opts) {
   const pb = document.getElementById('proj-pause-btn');
   if (pb) pb.style.display = isSpecific ? '' : 'none';
   if (fb) fb.style.display = isSpecific ? '' : 'none';
+  const lb = document.getElementById('proj-limits-btn');
+  if (lb) lb.style.display = isSpecific ? '' : 'none';
+  const ab = document.getElementById('proj-archive-btn');
+  if (ab) ab.style.display = isSpecific ? '' : 'none';
+  const rb = document.getElementById('proj-rename-btn');
+  if (rb) rb.style.display = isSpecific ? '' : 'none';
   if (sb) sb.style.display = isSpecific ? '' : 'none';
   _updateFreezeBtn();
   _showProjectRoot(S.selectedProject);
@@ -231,6 +243,12 @@ export function toggleProjectChip(name) {
   const pb = document.getElementById('proj-pause-btn');
   if (pb) pb.style.display = isSpecific ? '' : 'none';
   if (fb) fb.style.display = isSpecific ? '' : 'none';
+  const lb = document.getElementById('proj-limits-btn');
+  if (lb) lb.style.display = isSpecific ? '' : 'none';
+  const ab = document.getElementById('proj-archive-btn');
+  if (ab) ab.style.display = isSpecific ? '' : 'none';
+  const rb = document.getElementById('proj-rename-btn');
+  if (rb) rb.style.display = isSpecific ? '' : 'none';
   if (sb) sb.style.display = isSpecific ? '' : 'none';
   if (typeof _updateFreezeBtn === 'function') _updateFreezeBtn();
   if (typeof _showProjectRoot === 'function') _showProjectRoot(S.selectedProject);

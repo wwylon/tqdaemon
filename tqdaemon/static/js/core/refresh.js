@@ -405,6 +405,7 @@ export async function refresh() {
     S.cfg = s.config || {};
     _updateStatusPill(s);
     _setOffline(false);
+    _setLifecycle(s.lifecycle, Array.isArray(s.running) ? s.running.length : 0);
     const dotEarly = document.getElementById('live-dot');
     if (dotEarly) dotEarly.classList.add('live');
     let projectsChanged = false;
@@ -579,6 +580,19 @@ export async function refresh() {
 }
 
 let _isOffline = false;
+/** Show the daemon's own state: shutdown stage (stopping or handing over tasks) or drain mode (no new starts). */
+export function _setLifecycle(info, runningCount) {
+  const banner = document.getElementById('lifecycle-banner');
+  if (!banner) return;
+  const i = info || {};
+  let key = '';
+  if (i.shutting_down) key = i.keep_runs ? 'lifecycle.shutdownHandover' : 'lifecycle.shutdownStopping';
+  else if (i.draining) key = 'lifecycle.draining';
+  if (!key) { banner.style.display = 'none'; banner.textContent = ''; return; }
+  banner.textContent = i18n.t(key, { n: Number(runningCount || 0) });
+  banner.style.display = '';
+  _a11yAnnounce(banner.textContent);
+}
 let _a11yLast = '';
 function _a11yAnnounce(msg) {
   const live = document.getElementById('tq-a11y-live');

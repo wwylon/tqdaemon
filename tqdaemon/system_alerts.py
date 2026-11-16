@@ -313,7 +313,7 @@ def update_system_alert(
     if fields:
         sets = ", ".join(f"{k} = ?" for k in fields)
         conn.execute(
-            f"UPDATE system_alerts SET {sets} WHERE key = ?",
+            f"UPDATE system_alerts SET {sets} WHERE key = ?",  # noqa: S608
             (*fields.values(), key),
         )
         conn.commit()

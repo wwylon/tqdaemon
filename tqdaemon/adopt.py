@@ -131,6 +131,15 @@ def request_keep_runs(home: Path) -> None:
     (home / _KEEP_RUNS).write_text(str(int(time.time())), encoding="ascii")
 
 
+def peek_keep_runs(home: Path, *, max_age_sec: float = 600.0) -> bool:
+    """Like ``consume_keep_runs`` but leaves the marker (the shutdown banner asks before the real consume)."""
+    try:
+        stamp = float((home / _KEEP_RUNS).read_text(encoding="ascii").strip() or 0)
+    except (OSError, ValueError):
+        return False
+    return time.time() - stamp <= max_age_sec
+
+
 def consume_keep_runs(home: Path, *, max_age_sec: float = 600.0) -> bool:
     """True (and clear the marker) when a recent ``tq restart`` asked to keep runs alive."""
     path = home / _KEEP_RUNS

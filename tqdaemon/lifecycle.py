@@ -232,7 +232,7 @@ def requeue_orphaned_running(
     _requeue_window = int(cfg.get("clock_jump_requeue_window_sec", 3600)) if reason == "clock-jump" else 0
     # Broad UPDATE still covers pid-less local running rows (stop() / clock-jump).
     conn.execute(
-        "UPDATE runs SET status = 'interrupted', finished_at = ?, exit_code = -1, "
+        "UPDATE runs SET status = 'interrupted', finished_at = ?, exit_code = -1, "  # noqa: S608
         "wall_sec = CAST(ROUND((julianday(?) - julianday(started_at)) * 86400) AS INTEGER), "
         "last_error_code = COALESCE(?, last_error_code), stopped_by = ?, "
         "stop_reason = COALESCE(?, stop_reason), error_category = ?, lease_expires_at = NULL "
@@ -279,7 +279,7 @@ def requeue_orphaned_running(
         if result in ("denied", "skipped_reuse"):
             kill_failed.add((str(row["project"]), str(row["task_id"])))
     orphaned = conn.execute(
-        "SELECT DISTINCT t.project, t.task_id FROM tasks t "
+        "SELECT DISTINCT t.project, t.task_id FROM tasks t "  # noqa: S608
         "WHERE t.status = 'running' AND NOT EXISTS ("
         "  SELECT 1 FROM runs r WHERE r.project = t.project AND r.task_id = t.task_id "
         "  AND r.status = 'running' AND (r.worker_id IS NOT NULL"

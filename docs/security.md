@@ -18,7 +18,7 @@ tq config set auth_token=<strong-random-token>   # manual
 Once set, all `/api/*` requests must include the token in one of:
 - `Authorization: Bearer <token>` header
 - `X-TQ-Token: <token>` header
-- `?tq_token=<token>` query parameter (convenient for browser use, avoid logging URLs). The web UI stores it in `localStorage` on first load and strips it from the address bar.
+- `?tq_token=<token>` query parameter — **deprecated on `/api` calls** (the daemon logs a one-time warning; query strings leak into logs, history and Referer). Opening the UI page once with `?tq_token=` is still fine: the UI stores it and strips it. The web UI stores it in `localStorage` on first load and strips it from the address bar.
 - `?tq_ticket=<ticket>` on the streaming endpoints only (`/api/events`, `/api/logs/<id>/stream`): the web UI POSTs `/api/sse-ticket` (normal header auth) and opens `EventSource` with the returned 120 s ticket, so the long-lived token stays out of URLs, logs and Referer headers. A ticket inherits the issuer's scope and project limits, works for GET streams only, and is held in daemon memory (lost on restart).
 
 **Token is stored in plaintext** in `~/.tqdaemon/queue.db` (SQLite `config` table). This is intentional — the goal is authentication, not secret management. If you need stronger protection, restrict filesystem access to the queue home directory.
@@ -195,3 +195,15 @@ Maintainer-only (GitHub Insights → Traffic): repo views and clones for about
 
 Optional `notify_url` on a task is an **operator-configured** webhook you
 control — not product telemetry.
+
+## Local clients (`require_token_local`)
+
+By default a client connecting from loopback with a direct (non-proxied) request skips the token, so any local process is effectively admin. On a shared machine set `tq config set require_token_local 1`: loopback clients then present the token like remote ones (the UI keeps it in Preferences; CLI/MCP clients must be given it).
+
+## Worker auto-upgrade
+
+`GET /api/worker/version` carries `sig`, an HMAC of `(version, wheel sha256)` keyed by the shared `auth_token`. A worker that has the token upgrades only to a wheel with a valid `sig`, so a machine in the middle of a plain-HTTP LAN cannot push code to workers. Without a token there is nothing to sign with: use a trusted network or `pin_version`. The wheel URL must be a plain path on the master (no `@host`, no scheme).
+
+## The token at rest
+
+The legacy `auth_token` is stored in `queue.db` (config table) and read from there by the local CLI. It is not hashed: a process that can read your state home can already read the DB, and the CLI/workers need the raw value. What is protected: `tq export` blanks it unless you pass `--with-token`, `GET /api/config` and the config audit log redact it, and scoped API tokens (`tq` token UI) are stored only as sha256 hashes — prefer those for scripts.

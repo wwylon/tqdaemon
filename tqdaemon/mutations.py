@@ -78,14 +78,20 @@ def stop_op(
     *,
     reason: str = "",
     force: bool = False,
+    hard: bool = False,
 ) -> dict[str, Any]:
-    """Stop a running task or mark a queued task interrupted (F-246 offline parity)."""
+    """Stop a running task or mark a queued task interrupted (F-246 offline parity). ``hard``: kill now."""
     from tqdaemon.mutate import mutate
 
     reason = (reason or "").strip()[:200]
     path = f"/api/stop/{project}/{task_id}"
+    qparts = []
     if reason:
-        path = f"{path}?reason={quote(reason, safe='')}"
+        qparts.append(f"reason={quote(reason, safe='')}")
+    if hard:
+        qparts.append("hard=1")
+    if qparts:
+        path = f"{path}?{'&'.join(qparts)}"
 
     def _offline() -> dict[str, Any]:
         from tqdaemon._db_tasks import transition_task
@@ -134,7 +140,7 @@ def stop_op(
             from tqdaemon.eta import task_eta
 
             eta = task_eta(conn, project, task_id)
-            request_stop_with_control(conn, home, project, task_id)
+            request_stop_with_control(conn, home, project, task_id, hard=hard)
             return {
                 "ok": True,
                 "status": "running",

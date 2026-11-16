@@ -53,7 +53,7 @@ def main(argv: list[str] | None = None) -> int:
         popen_kwargs = apply_hide_console_popen_kwargs({})
     with open(log, "a", encoding="utf-8", errors="replace", buffering=1) as out:
         try:
-            proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, **popen_kwargs)
+            proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, **popen_kwargs)  # noqa: S603
         except OSError as exc:
             out.write(f"[tq-wrapper] could not start {cmd[0]!r}: {exc}\n")
             code = 127

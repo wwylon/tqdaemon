@@ -136,8 +136,8 @@ def prune_runs(
             for i in range(0, len(run_ids), _BATCH):
                 chunk = run_ids[i : i + _BATCH]
                 placeholders = ",".join("?" * len(chunk))
-                conn.execute(f"DELETE FROM resource_history WHERE run_id IN ({placeholders})", chunk)
-                conn.execute(f"DELETE FROM runs WHERE run_id IN ({placeholders})", chunk)
+                conn.execute(f"DELETE FROM resource_history WHERE run_id IN ({placeholders})", chunk)  # noqa: S608
+                conn.execute(f"DELETE FROM runs WHERE run_id IN ({placeholders})", chunk)  # noqa: S608
                 conn.commit()
 
         total_rows += len(run_ids)

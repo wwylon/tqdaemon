@@ -241,8 +241,8 @@ def pull_from_master(
     project_root.mkdir(parents=True, exist_ok=True)
 
     def _get_json(url: str, timeout: float = 60.0) -> dict[str, Any]:
-        req = urllib.request.Request(url, headers=auth_headers)
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        req = urllib.request.Request(url, headers=auth_headers)  # noqa: S310
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
             return json.loads(resp.read().decode("utf-8"))
 
     try:
@@ -298,8 +298,8 @@ def pull_from_master(
         dest = project_root / rel.replace("/", os.sep)
         try:
             dest.parent.mkdir(parents=True, exist_ok=True)
-            req = urllib.request.Request(url, headers=auth_headers)
-            with urllib.request.urlopen(req, timeout=120) as resp:
+            req = urllib.request.Request(url, headers=auth_headers)  # noqa: S310
+            with urllib.request.urlopen(req, timeout=120) as resp:  # noqa: S310
                 data = resp.read()
             tmp = dest.with_suffix(dest.suffix + ".tqpartial")
             tmp.write_bytes(data)

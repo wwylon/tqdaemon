@@ -26,6 +26,7 @@ STOP_RAM = "tq.stop.ram"  # host over hard RAM limit; status=stopped
 STOP_VRAM = "tq.stop.vram"  # GPU over hard VRAM limit; status=stopped
 DEP_CANCELLED = "tq.dep.cancelled"  # T-206: cancelled because a dependency failed (on_dependency_failure: cancel)
 STOP_SCAVENGER = "tq.stop.scavenger"  # T-204: preempted for higher-priority work; status=stopped (auto-restart)
+STOP_KILLED = "tq.stop.killed"  # operator hard stop (`tq stop --now` / UI Kill now): tree killed, no grace
 STOP_DEPS = "tq.stop.deps"  # depends_on peer no longer completed while running; status=stopped
 
 RUN_ARTIFACTS_MISSING = "tq.run.artifacts_missing"

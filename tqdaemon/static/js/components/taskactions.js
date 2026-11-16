@@ -206,6 +206,21 @@ export async function stopTask(btn, project, taskId) {
   } finally { _btnDone(btn); }
   refresh();
 }
+/** Hard stop: kill the process tree now (no checkpoint grace). Always confirms — progress is lost. */
+export function killTask(btn, project, taskId) {
+  if (!_btnPending(btn, i18n.t('btn.stopping'))) return;
+  let settled = false;
+  const release = () => { if (!settled) { settled = true; _btnDone(btn); } };
+  openConfirm(i18n.t('confirm.killNow', {project, taskId}), async () => {
+    try {
+      await _postJson(`/api/stop/${encodeURIComponent(project)}/${encodeURIComponent(taskId)}?hard=1`);
+      showToast(i18n.t('toast.killed'), 'ok');
+    } catch (e) {
+      showToast(String(/** @type {any} */ (e).message || e), 'err');
+    } finally { release(); }
+    refresh();
+  }, { title: i18n.t('modal.killTitle'), confirmLabel: i18n.t('btn.killNow'), onCancel: release });
+}
 export async function holdTask(btn, project, taskId, durationSec) {
   if (!_btnPending(btn, i18n.t('btn.hold'))) return;
   let sec = Number(durationSec);
@@ -300,6 +315,21 @@ function _watchForce(project, taskId) {
     setTimeout(tick, FORCE_POLL_MS);
   };
   setTimeout(tick, FORCE_POLL_MS);
+}
+
+/** Operator "Start now": first in line, ignores RAM/VRAM held for other tasks (no confirm — it never overcommits). */
+export async function startNowTask(btn, project, taskId) {
+  if (!_btnPending(btn, i18n.t('btn.starting'))) return;
+  try {
+    await _postJson(`/api/start-now/${encodeURIComponent(project)}/${encodeURIComponent(taskId)}`);
+    _optimisticQueueStatus(project, taskId, 'queued');
+    showToast(i18n.t('toast.startNowWaiting'), 'info');
+    _watchForce(project, taskId);
+  } catch (e) {
+    showToast(String(/** @type {any} */ (e).message || e), 'err');
+  } finally {
+    _btnDone(btn);
+  }
 }
 
 export function forceTask(btn, project, taskId) {
@@ -450,9 +480,10 @@ export function stopAllProject() {
     settled = true;
     _btnDone(btn);
   };
-  openConfirm(i18n.t('task.stopAllInProject', {project: S.selectedProject}), async () => {
+  const project = S.selectedProject;
+  const run = async (/** @type {boolean} */ hard) => {
     try {
-      const r = await fetch(`/api/project/stop-all/${encodeURIComponent(S.selectedProject)}`, {method:'POST'});
+      const r = await fetch(`/api/project/stop-all/${encodeURIComponent(project)}${hard ? '?hard=1' : ''}`, {method:'POST'});
       const j = await r.json().catch(()=>({}));
       openAlert(i18n.t('alert.stoppedTasks', {n: j.stopped||0}));
       refresh();
@@ -461,10 +492,17 @@ export function stopAllProject() {
     } finally {
       release();
     }
-  }, {
+  };
+  const om = typeof globalThis.openModal === 'function' ? globalThis.openModal : openModal;
+  om({
     title: i18n.t('modal.stopProjectTitle'),
-    confirmLabel: i18n.t('btn.stopAll'),
-    onCancel: release,
+    body: `<div>${escHtml(i18n.t('task.stopAllInProject', {project}))}</div>`,
+    onDismiss: release,
+    actions: [
+      { label: i18n.t('btn.cancel'), onClick: release },
+      { label: i18n.t('btn.killAll'), onClick: () => run(true) },
+      { label: i18n.t('btn.stopAll'), primary: true, onClick: () => run(false) },
+    ],
   });
 }
 

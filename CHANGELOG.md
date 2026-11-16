@@ -4,7 +4,54 @@ All notable changes to this project are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project uses [Semantic Versioning](https://semver.org/).
 
+### Fixed
+
+- `tq archive` no longer archives a finished task that an unfinished task depends on (the dependent would be blocked forever as "not found"); output reports `kept_as_dependency`.
+- `tq archive` / archive age now uses `finished_at`; `updated_at` is rewritten by every sync, so `--older-than` matched nothing.
+- Scheduler tick could take minutes: YAML cache cleanup resolved every cached path once per project.
+
 ## [Unreleased]
+
+### Added
+
+- **GPU leases** for interactive GPU work: `tq gpu run --vram 3 -- python demo.py` waits until the scheduler has the VRAM free, runs the command and releases the lease; `tq lease acquire|release|list` and `/api/leases` for scripts. Leases count like a running task's declared `gpu_vram_gib` and end on release, TTL or when the holder process dies; `tq capacity` lists them.
+- **Opt-in Ollama unload** (`ollama_unload_url`): a GPU task blocked on VRAM asks resident Ollama models to unload (`keep_alive: 0`).
+- **`tq hint show` / `tq hint reset`** explain and clear a task's RAM hint; the Why? panel and `tq why` show where it comes from. Outlier peaks (more than 3x the next one) no longer set the hint, and a declared `ram_gib` beats sibling/group history.
+- **`require_token_local`** makes loopback clients present the API token too; **`cpu_charge_measured`** charges running tasks their measured cores when admitting new ones.
+- **`tq archive --task-glob PATTERN`** (and an id-pattern field in the Archive dialog); a bulk archive now runs as a background job (`GET /api/jobs/<id>`) so it cannot time out.
+- `web.bat` starts the daemon (if needed) and opens the dashboard; a scheduler-tick watchdog dumps all thread stacks if a tick stalls.
+- **`tq drain on|off|status`** (config `admission_drain`): finish what runs, start nothing new, also for remote workers; the web UI shows a **Drain mode** banner. **`tq stop-daemon --keep-runs`** leaves adoptable runs running. While the daemon shuts down the web UI now shows a **shutting down** banner (tasks handed over to the next daemon, or being stopped) instead of going dark.
+- `docs/agents/queue-rules.md`: when to enqueue, how to wait, what not to do.
+- **`tq project rename <old> <new>`** (`--dry-run`, `--no-alias`; web: project page **Rename…**; `POST /api/project/rename/<old>`) renames a project id with its history: tasks, runs, usage, limits/colour/freeze settings, scoped tokens and workers, `depends_on` references in other projects, the `projects.yaml` key, the log folder and the archive file move in one step, with backups and an undo (rename back). The old name stays an alias (`tq project alias list|rm`) so old YAMLs, CLI keys, MCP and API calls keep working. Admin only; refused while a task of the project runs. Schema 37 (`project_aliases`).
+
+### Security
+
+- A write-scoped API token can no longer relocate or release a project (admin only). A non-ASCII token header is a clean 401 instead of a server error.
+- Worker auto-upgrade only installs a wheel the master signed (HMAC with the shared token) and only from a plain path on the master; `tq export` blanks the stored `auth_token` unless `--with-token`.
+- API tokens in the query string log a one-time deprecation warning. Ruff security rules (S104/S105/S202/S324/S606/S608/S310/S603/S607) are enforced.
+
+### Changed
+
+- GPU-looking keys under `resources:` (`gpu`, `vram`, ...) are rejected instead of silently ignored; other unknown keys warn.
+- A running task's declared VRAM is held as `max(live, declared)`, not live + declared (Windows hides per-process VRAM), so two declared-5 GiB tasks no longer share a 6 GiB card.
+- Schema version 36 (new `gpu_leases` table).
+
+### Fixed
+
+- Docs page: "Could not load this guide" for every guide when the sidebar had grouped guides.
+- `tq retry --force` is parsed (the ownership hint told you to pass it, but it was treated as a task id).
+- `tq remove` no longer reports "currently running" when the task was already gone.
+- A task's own last RAM peak can no longer block it for hours when it declares `ram_gib`.
+
+### Added (earlier, unreleased)
+
+- **Timeline** lists queued tasks that get no bar, with the reason (paused/frozen project, dead dependency, unmet dependency, after the window); `GET /api/timeline` returns `not_shown`.
+- **Archive… button** on the project page: preview how many finished tasks older than N days (chosen statuses) would go, then archive them (same as `tq archive`: JSONL export, YAML moved to `archive/`, rows dropped).
+- **Settings dialog** replaces "Resource limits": tabs (Limits, Scheduling, Memory & safety, Stopping & restart, Notifications, Server, Retention, All settings), every change staged with an unsaved-changes count and applied by one Save. Every config key now has a UI (the "All settings" tab is generated from the server's key list, `GET /api/config/schema`).
+- **One limits tree** (Settings → Limits, `tq limits`, `GET /api/limits/tree`, `POST /api/limits/node`): all > sets > projects, the same caps on every node, each the total of what runs under it; the form shows the effective ancestor cap and live usage, and can create, delete and re-parent sets. Project page has a **⚖ Limits…** shortcut — per-project max tasks is now one click away.
+- **Hard stop**: `tq stop <task> --now`, drawer **Kill now**, project "Kill all now", `?hard=1` on the stop API, MCP `stop_task hard=true` — kills the process tree immediately instead of waiting for a checkpoint (`tq.stop.killed`); works on remote workers too.
+
+- **Start now** (task drawer button, `tq start-now <project/task_id>`, `POST /api/start-now/<project>/<task>`): a task you start by hand goes first in line and ignores RAM/VRAM the scheduler is holding for other waiting tasks. Unlike Force it never overcommits: it still needs real free memory and respects dependencies, locks and limits.
 
 ## [0.9.0] - 2026-11-12
 

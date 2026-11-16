@@ -60,6 +60,8 @@ Token and CSRF details are in [security](../security.md).
 
 ## Offline shell (PWA)
 
+**Project page buttons:** besides Pause/Block/Limits/Stop all, a specific project has **🗄 Archive…** (preview, optional task-id pattern such as `localize_*`, runs as a background job) and **✏ Rename…** (changes the project id with its history; the old name keeps working as an alias; refused while a task of the project runs). **Banners:** red *offline* (daemon unreachable), amber *shutting down* (the daemon got its stop signal: running tasks are being handed over or stopped) and amber *drain mode* (`tq drain on`: nothing new starts).
+
 The UI registers a service worker (`/sw.js`, served by the daemon with a cache version derived from the static asset sizes and mtimes) and a web manifest (`/manifest.webmanifest`), so it can be installed as an app and the page shell still loads when the daemon is unreachable. Static assets are fetched network-first, so an upgraded daemon is picked up immediately; the cache is only the offline fallback. `/api/*` and `/docs/*` are never cached, so offline you see the last rendered page plus an **Offline** banner, not stale queue data. Service workers need a secure context: they work on `http://127.0.0.1` / `localhost` and over HTTPS, but not on plain HTTP to another host.
 
 ## Contributing to the UI scripts

@@ -202,6 +202,34 @@ class WriteRoutes:
         self._audit(f"set-node-{action}", path, path)
         self._json({"ok": True, "action": action, "path": path})
 
+    def _post_limit_node(self) -> None:
+        """POST /api/limits/node ``{kind: root|set|project, path, fields: {...}}`` — one node's caps."""
+        from tqdaemon.limit_tree import write_limit_node
+
+        data = self._read_json()
+        if data is None:
+            return
+        kind = str(data.get("kind") or "")
+        path = str(data.get("path") or "").strip()
+        fields = data.get("fields")
+        if not isinstance(fields, dict):
+            self._json({"ok": False, "error": "body.fields must be an object"}, status=400)
+            return
+        if kind == "set":
+            from tqdaemon.project_sets import normalize_path
+
+            try:
+                path = normalize_path(path) or ""
+            except ValueError as exc:
+                self._json({"ok": False, "error": str(exc)}, status=400)
+                return
+        err = write_limit_node(self._wconn(), kind, path, fields)
+        if err:
+            self._json({"ok": False, "error": err}, status=400)
+            return
+        self._audit("limits", kind, path or "all", json.dumps(fields, sort_keys=True)[:200])
+        self._json({"ok": True})
+
     def _post_set_limits(self) -> None:
         """POST /api/set-limits body ``{set: path, ...fields}`` — set-level limit defaults."""
         from tqdaemon.db import set_set_limit
@@ -525,6 +553,24 @@ class WriteRoutes:
         self._audit("release", project, project)
         self._json(result)
 
+    def _post_rename_project(self, project: str) -> None:
+        """POST /api/project/rename/<old> body ``{new, dry_run?, alias?}`` — rename a project id with its history."""
+        data = self._read_json() or {}
+        new = str(data.get("new") or "").strip()
+        if not project or not new:
+            self._send_error_json(400, "body must include new")
+            return
+        dry_run, keep_alias = bool(data.get("dry_run")), bool(data.get("alias", True))
+        fn = getattr(self, "_rename_project", None) or getattr(self._ctx, "rename_project", None)
+        if fn is None:
+            self._json({"ok": False, "error": "rename requires a running daemon"}, status=503)
+            return
+        result = fn(project, new, dry_run, keep_alias)
+        status = 200 if result.get("ok") else (404 if "not registered" in str(result.get("error", "")) else 409)
+        if result.get("ok") and not dry_run:
+            self._audit("project_rename", new, project, new)
+        self._json(result, status=status)
+
     def _post_relocate_project(self, project: str) -> None:
         """POST /api/project/relocate/<project> body ``{new_root}`` — rewrite root + yaml_source (F-240)."""
         if not project:
@@ -629,12 +675,13 @@ class WriteRoutes:
 
         # Tasks are mostly stopped for being too slow: report how much was left at this moment.
         eta = task_eta(self._rconn(), proj, task_id)
-        out = self._stop_one(proj, task_id)
+        hard = ((qs.get("hard") or ["0"])[0] or "0").strip().lower() in ("1", "true", "yes")
+        out = self._stop_one(proj, task_id, hard=hard)
         if eta and "remaining_sec" in eta:
             out["eta"] = eta
         self._json(out)
 
-    def _stop_one(self, proj: str, task_id: str) -> dict[str, Any]:
+    def _stop_one(self, proj: str, task_id: str, *, hard: bool = False) -> dict[str, Any]:
         conn = self._wconn()
         # Short-circuit: queued tasks have no running process — mark interrupted
         # immediately instead of waiting for daemon pickup. The status guard is in the
@@ -647,9 +694,11 @@ class WriteRoutes:
         if changed:
             self._audit("stop", proj, task_id)
             return {"ok": True, "final_status": "interrupted"}
-        request_stop_with_control(conn, Path(self._db_path).parent, proj, task_id, requested_by=self._requester())
-        self._audit("stop", proj, task_id)
-        return {"ok": True}
+        request_stop_with_control(
+            conn, Path(self._db_path).parent, proj, task_id, requested_by=self._requester(), hard=hard
+        )
+        self._audit("stop_hard" if hard else "stop", proj, task_id)
+        return {"ok": True, "hard": hard}
 
     def _post_hold(self, path: str, qs: dict) -> None:
         """POST /api/hold/<project>/<task_id>?duration_sec=&reason= — cooperative in-process idle."""
@@ -884,7 +933,7 @@ class WriteRoutes:
         ordered = sorted(statuses)
         placeholders = ",".join("?" * len(ordered))
         return conn.execute(
-            f"SELECT project, task_id, status FROM tasks WHERE {where} AND status IN ({placeholders})",
+            f"SELECT project, task_id, status FROM tasks WHERE {where} AND status IN ({placeholders})",  # noqa: S608
             (*params, *ordered),
         ).fetchall()
 
@@ -972,7 +1021,7 @@ class WriteRoutes:
             where += " AND project = ?"
             params.append(project)
         rows = conn.execute(
-            f"SELECT project, task_id FROM tasks WHERE {where} AND status IN ({placeholders})",
+            f"SELECT project, task_id FROM tasks WHERE {where} AND status IN ({placeholders})",  # noqa: S608
             (*params, *ordered),
         ).fetchall()
         retried = 0
@@ -1317,6 +1366,10 @@ class WriteRoutes:
         wanted = data.get("projects")
         statuses = data.get("statuses") or list(DEFAULT_STATUSES)
         max_completed_runs = data.get("max_completed_runs")
+        task_glob = data.get("task_glob")
+        if task_glob is not None and not isinstance(task_glob, str):
+            self._json({"ok": False, "error": "task_glob must be a string"}, status=400)
+            return
         try:
             days = float(data.get("older_than_days", 30))
         except (TypeError, ValueError):
@@ -1340,6 +1393,33 @@ class WriteRoutes:
         if unknown:
             self._json({"ok": False, "error": f"Unknown project(s): {', '.join(unknown)}"}, status=404)
             return
+        if data.get("async") and not data.get("dry_run"):
+            # C7: a bulk archive can outlast any client timeout; run it as a polled job (own connection).
+            from tqdaemon import jobs
+            from tqdaemon.db import open_write_conn
+
+            db_path = Path(self._db_path)
+            kwargs = {
+                "home": db_path.parent,
+                "older_than_days": days,
+                "statuses": tuple(statuses),
+                "only_projects": wanted or None,
+                "dry_run": False,
+                "max_completed_runs": max_completed_runs,
+                "task_glob": task_glob or None,
+            }
+
+            def _job() -> dict:
+                conn = open_write_conn(db_path)
+                try:
+                    return archive_tasks(conn, known, **kwargs)
+                finally:
+                    conn.close()
+
+            job_id = jobs.submit("archive", _job)
+            self._audit("archive", detail=f"async job {job_id} started")
+            self._json({"ok": True, "job": job_id}, status=202)
+            return
         result = archive_tasks(
             self._wconn(),
             known,
@@ -1349,10 +1429,21 @@ class WriteRoutes:
             only_projects=wanted or None,
             dry_run=bool(data.get("dry_run")),
             max_completed_runs=max_completed_runs,
+            task_glob=task_glob or None,
         )
         if result["archived"] and not result["dry_run"]:
             self._audit("archive", detail=f"{result['archived']} task(s)")
         self._json({"ok": True, **result})
+
+    def _job_status(self, job_id: str) -> None:
+        """GET /api/jobs/<id> — state of a background job (running | done | error)."""
+        from tqdaemon import jobs
+
+        job = jobs.get(job_id)
+        if job is None:
+            self._json({"ok": False, "error": "unknown job (jobs are forgotten on daemon restart)"}, status=404)
+            return
+        self._json({"ok": True, **job})
 
     def _cli_add(self) -> None:
         """P6: POST /api/cli/add — upsert YAML text for a registered project (F-251 shared submit)."""

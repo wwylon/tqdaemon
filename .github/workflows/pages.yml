@@ -1,11 +1,6 @@
 # Deploy top-level site/ to GitHub Pages (legacy branch Sources only allow / or /docs).
 name: pages
 on:
-  push:
-    branches: [main]
-    paths:
-      - "site/**"
-      - ".github/workflows/pages.yml"
   workflow_dispatch:
 
 permissions:

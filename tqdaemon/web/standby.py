@@ -35,9 +35,7 @@ class StandbyHandler(BaseHTTPRequestHandler):
 
     def _check_standby_auth(self) -> bool:
         """F-053: enforce the same auth_token as the main daemon (timing-safe)."""
-        import hmac
-
-        from tqdaemon.auth import extract_request_token
+        from tqdaemon.auth import extract_request_token, secure_equals
 
         try:
             row = type(self)._conn_box[0].execute("SELECT value FROM config WHERE key='auth_token'").fetchone()
@@ -49,7 +47,7 @@ class StandbyHandler(BaseHTTPRequestHandler):
         provided = extract_request_token(dict(self.headers))
         if not provided:
             return False
-        return hmac.compare_digest(provided, str(token))
+        return secure_equals(provided, str(token))
 
     def _row_counts(self) -> dict[str, int]:
         try:

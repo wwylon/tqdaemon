@@ -110,8 +110,8 @@ def env_lock_hash(project_root: Path) -> str:
 
 
 def _run_git(root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", "-C", str(root), *args],
+    return subprocess.run(  # noqa: S603
+        ["git", "-C", str(root), *args],  # noqa: S607
         capture_output=True,
         text=True,
         check=check,
@@ -281,8 +281,8 @@ def materialize_git_package(
     with tempfile.NamedTemporaryFile(suffix=".tar", delete=False) as tmp:
         tmp_path = Path(tmp.name)
     try:
-        arch = subprocess.run(
-            ["git", "-C", str(git_root), "archive", "--format=tar", package.commit],
+        arch = subprocess.run(  # noqa: S603
+            ["git", "-C", str(git_root), "archive", "--format=tar", package.commit],  # noqa: S607
             capture_output=True,
             check=True,
         )

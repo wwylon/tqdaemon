@@ -279,6 +279,10 @@ TOOLS = [
                     "type": "string",
                     "description": "Why the task was stopped (stored on runs.stop_reason, max 200 chars)",
                 },
+                "hard": {
+                    "type": "boolean",
+                    "description": "Hard stop: kill the process tree now, no checkpoint grace (tq stop --now)",
+                },
             },
             "required": ["project", "task_id"],
         },
@@ -683,7 +687,7 @@ def _retry_tasks(home: Path, args: dict[str, Any]) -> Any:
             clauses.append("status IN (" + ",".join("?" for _ in statuses) + ")")
             params.extend(sorted(statuses))
             rows = conn.execute(
-                f"SELECT project, task_id FROM tasks WHERE {' AND '.join(clauses)} ORDER BY project, task_id",
+                f"SELECT project, task_id FROM tasks WHERE {' AND '.join(clauses)} ORDER BY project, task_id",  # noqa: S608
                 params,
             ).fetchall()
             keys = [(str(r["project"]), str(r["task_id"])) for r in rows]
@@ -926,6 +930,7 @@ def _stop_task(home: Path, args: dict[str, Any]) -> Any:
         task_id,
         reason=(args.get("reason") or ""),
         force=bool(args.get("force")),
+        hard=bool(args.get("hard")),
     )
 
 
@@ -1463,6 +1468,10 @@ def _call_tool(home: Path, name: str, args: dict[str, Any]) -> Any:
     fn = _HANDLERS.get(name)
     if fn is None:
         raise ValueError(f"unknown tool: {name}")
+    if isinstance(args.get("project"), str):
+        from tqdaemon.project_rename import resolve_project_in_home
+
+        args = {**args, "project": resolve_project_in_home(home, args["project"])}
     return fn(home, args)
 
 
